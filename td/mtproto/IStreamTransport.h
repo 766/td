@@ -1,5 +1,5 @@
 //
-// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2019
+// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2026
 //
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
@@ -22,7 +22,7 @@ class IStreamTransport {
   IStreamTransport(const IStreamTransport &) = delete;
   IStreamTransport &operator=(const IStreamTransport &) = delete;
   virtual ~IStreamTransport() = default;
-  virtual Result<size_t> read_next(BufferSlice *message, uint32 *quick_ack) = 0;
+  virtual Result<size_t> read_next(BufferSlice *message, uint32 *quick_ack, int32 *error_code) = 0;
   virtual bool support_quick_ack() const = 0;
   virtual void write(BufferWriter &&message, bool quick_ack) = 0;
   virtual bool can_read() const = 0;

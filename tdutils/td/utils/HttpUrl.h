@@ -1,5 +1,5 @@
 //
-// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2019
+// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2026
 //
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
@@ -11,11 +11,13 @@
 #include "td/utils/Status.h"
 #include "td/utils/StringBuilder.h"
 
+#include <utility>
+
 namespace td {
 
 class HttpUrl {
  public:
-  enum class Protocol { HTTP, HTTPS } protocol_ = Protocol::HTTP;
+  enum class Protocol { Http, Https } protocol_ = Protocol::Http;
   string userinfo_;
   string host_;
   bool is_ipv6_ = false;
@@ -37,9 +39,23 @@ class HttpUrl {
 };
 
 Result<HttpUrl> parse_url(Slice url,
-                          HttpUrl::Protocol default_protocol = HttpUrl::Protocol::HTTP) TD_WARN_UNUSED_RESULT;
+                          HttpUrl::Protocol default_protocol = HttpUrl::Protocol::Http) TD_WARN_UNUSED_RESULT;
 
 StringBuilder &operator<<(StringBuilder &sb, const HttpUrl &url);
+
+class HttpUrlQuery {
+ public:
+  vector<string> path_;
+  vector<std::pair<string, string>> args_;
+
+  bool has_arg(Slice key) const;
+
+  Slice get_arg(Slice key) const;
+};
+
+HttpUrlQuery parse_url_query(Slice query);
+
+string get_url_host(Slice url);
 
 string get_url_query_file_name(const string &query);
 

@@ -1,12 +1,12 @@
 //
-// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2019
+// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2026
 //
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
 //
-#include "tl_writer.h"
+#include "td/tl/tl_writer.h"
 
-#include "tl_core.h"
+#include "td/tl/tl_core.h"
 
 #include <cassert>
 #include <cstdio>
@@ -70,7 +70,7 @@ bool TL_writer::is_combinator_supported(const tl_combinator *constructor) const 
       if (a.flags & FLAG_EXCL) {
         assert(t->var_num >= 0);
         if (is_function_result[t->var_num]) {
-          return false;  // lazy to check that result of two function calls is the same
+          return false;  // lazy to check that results of two function calls are the same
         }
         is_function_result[t->var_num] = true;
       } else {
@@ -133,6 +133,14 @@ bool TL_writer::is_combinator_supported(const tl_combinator *constructor) const 
 
 bool TL_writer::is_documentation_generated() const {
   return false;
+}
+
+bool TL_writer::is_default_constructor_generated(const tl_combinator *t, bool can_be_parsed, bool can_be_stored) const {
+  return true;
+}
+
+bool TL_writer::is_full_constructor_generated(const tl_combinator *t, bool can_be_parsed, bool can_be_stored) const {
+  return true;
 }
 
 std::string TL_writer::gen_main_class_name(const tl_type *t) const {

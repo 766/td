@@ -1,18 +1,23 @@
 param (
   [string]$vcpkg_root = $(throw "-vcpkg_root=<path to vcpkg> is required"),
-  [string]$arch = "",
+  [ValidateSet('x86', 'x64', 'ARM64', IgnoreCase = $false)]
+  [string[]]$arch = @( "x86", "x64", "ARM64" ),
   [string]$mode = "all",
-  [string]$compress = "7z"
+  [string]$compress = "7z",
+  [switch]$release_only = $false,
+  [switch]$nupkg = $false
 )
 $ErrorActionPreference = "Stop"
 
 $vcpkg_root = Resolve-Path $vcpkg_root
 
 $vcpkg_cmake="${vcpkg_root}\scripts\buildsystems\vcpkg.cmake"
-$arch_list = @( "x86", "x64", "ARM" )
-if ($arch) {
-  $arch_list = @(, $arch)
+$arch_list = $arch
+$config_list = @( "Debug", "Release" )
+if ($release_only -or $nupkg) {
+  $config_list = @(, "RelWithDebInfo")
 }
+$targets = @{ Debug = "Debug"; Release = "Retail"; RelWithDebInfo = "CommonConfiguration"}
 
 $td_root = Resolve-Path "../.."
 
@@ -35,9 +40,9 @@ function prepare {
 
   cd build-native
 
-  cmake $td_root -DCMAKE_TOOLCHAIN_FILE="$vcpkg_cmake" -DTD_ENABLE_DOTNET=ON
+  cmake -A Win32 -DTD_GENERATE_SOURCE_FILES=ON -DTD_ENABLE_DOTNET=CX "$td_root"
   CheckLastExitCode
-  cmake --build . --target prepare_cross_compiling
+  cmake --build .
   CheckLastExitCode
 
   cd ..
@@ -47,7 +52,7 @@ function config {
   New-Item -ItemType Directory -Force -Path build-uwp
   cd build-uwp
 
-  ForEach($arch in $arch_list) {
+  ForEach ($arch in $arch_list) {
     echo "Config Arch = [$arch]"
     New-Item -ItemType Directory -Force -Path $arch
     cd $arch
@@ -56,7 +61,7 @@ function config {
     if ($arch -eq "x86") {
       $fixed_arch = "win32"
     }
-    cmake "$td_root" -A $fixed_arch -DCMAKE_SYSTEM_VERSION="10.0" -DCMAKE_SYSTEM_NAME="WindowsStore" -DCMAKE_TOOLCHAIN_FILE="$vcpkg_cmake" -DTD_ENABLE_DOTNET=ON
+    cmake -A $fixed_arch -DCMAKE_SYSTEM_VERSION="10.0" -DCMAKE_SYSTEM_NAME="WindowsStore" -DCMAKE_TOOLCHAIN_FILE="$vcpkg_cmake" -DTD_ENABLE_PCH:BOOL=ON -DTD_ENABLE_DOTNET=CX "$td_root"
     CheckLastExitCode
     cd ..
   }
@@ -66,17 +71,19 @@ function config {
 
 function build {
   cd build-uwp
-  ForEach($arch in $arch_list) {
+  ForEach ($arch in $arch_list) {
     echo "Build Arch = [$arch]"
     cd $arch
-    cmake --build . --config Release --target tddotnet
-    cmake --build . --config Debug --target tddotnet
+    ForEach ($config in $config_list) {
+      cmake --build . --config $config --target tddotnet
+      CheckLastExitCode
+    }
     cd ..
   }
   cd ..
 }
 
-function export {
+function export-vsix {
   cd build-uwp
   Remove-Item vsix -Force -Recurse -ErrorAction SilentlyContinue
   New-Item -ItemType Directory -Force -Path vsix
@@ -85,23 +92,19 @@ function export {
   cp '../`[Content_Types`].xml' vsix
   cp ../LICENSE_1_0.txt vsix
 
-  ForEach($arch in $arch_list) {
-    New-Item -ItemType Directory -Force -Path vsix/DesignTime/Debug/${arch}
-    New-Item -ItemType Directory -Force -Path vsix/DesignTime/Retail/${arch}
-    New-Item -ItemType Directory -Force -Path vsix/Redist/Debug/${arch}
-    New-Item -ItemType Directory -Force -Path vsix/Redist/Retail/${arch}
+  ForEach ($arch in $arch_list) {
     New-Item -ItemType Directory -Force -Path vsix/References/CommonConfiguration/${arch}
+    ForEach ($config in $config_list) {
+      $target = $targets[$config]
 
-    cp ${arch}/Debug/* -include "LIBEAY*","SSLEAY*","zlib*" vsix/Redist/Debug/${arch}/
-    cp ${arch}/Release/* -include "LIBEAY*","SSLEAY*","zlib*" vsix/Redist/Retail/${arch}/
+      New-Item -ItemType Directory -Force -Path vsix/DesignTime/${target}/${arch}
+      cp ${arch}/${config}/Telegram.Td.lib vsix/DesignTime/${target}/${arch}/
 
-    cp ${arch}/Debug/* -filter "Telegram.Td.*" -include "*.lib" vsix/DesignTime/Debug/${arch}/
-    cp ${arch}/Release/*  -filter "Telegram.Td.*" -include "*.lib" vsix/DesignTime/Retail/${arch}/
+      New-Item -ItemType Directory -Force -Path vsix/Redist/${target}/${arch}
+      cp ${arch}/${config}/* -include "SSLEAY*","LIBEAY*","libcrypto*","libssl*","zlib*","Telegram.Td.pdb","Telegram.Td.dll" vsix/Redist/${target}/${arch}/
 
-    cp ${arch}/Debug/*  -filter "Telegram.Td.*" -include "*.pdb","*.dll" vsix/Redist/Debug/${arch}/
-    cp ${arch}/Release/*  -filter "Telegram.Td.*" -include "*.pdb","*.dll" vsix/Redist/Retail/${arch}/
-
-    cp ${arch}/Release/* -filter "Telegram.Td.*" -include "*.pri","*.winmd","*.xml" vsix/References/CommonConfiguration/${arch}/
+      cp ${arch}/${config}/* -include "Telegram.Td.pri","Telegram.Td.winmd","Telegram.Td.xml" vsix/References/CommonConfiguration/${arch}/
+    }
   }
 
   cd vsix
@@ -113,6 +116,30 @@ function export {
   } else {
     7z.exe a -tzip -r tdlib.vsix *
   }
+  cd ..
+}
+
+function export-nupkg {
+  cd build-uwp
+  Remove-Item nupkg -Force -Recurse -ErrorAction SilentlyContinue
+  New-Item -ItemType Directory -Force -Path nupkg/build/native
+  cp ../LICENSE_1_0.txt nupkg
+  cp ../Telegram.Td.UWP.nuspec nupkg
+  cp ../Telegram.Td.UWP.targets nupkg/build/native
+
+  ForEach ($arch in $arch_list) {
+    $fixed_arch = $arch.ToLower();
+    New-Item -ItemType Directory -Force -Path nupkg/runtimes/win10-${fixed_arch}/native
+    New-Item -ItemType Directory -Force -Path nupkg/lib/uap10.0
+
+    ForEach ($config in $config_list) {
+      cp ${arch}/${config}/* -include "SSLEAY*","LIBEAY*","libcrypto*","libssl*","zlib*","Telegram.Td.pdb","Telegram.Td.pri","Telegram.Td.dll" nupkg/runtimes/win10-${fixed_arch}/native
+      cp ${arch}/${config}/* -include "Telegram.Td.winmd","Telegram.Td.xml" nupkg/lib/uap10.0
+    }
+  }
+
+  cd nupkg
+  nuget pack Telegram.Td.UWP.nuspec
   cd ..
 }
 
@@ -132,7 +159,11 @@ function run {
       build
     }
     if (($mode -eq "export") -or ($mode -eq "all")) {
-      export
+      if ($nupkg) {
+        export-nupkg
+      } else {
+        export-vsix
+      }
     }
   } Finally {
     Pop-Location

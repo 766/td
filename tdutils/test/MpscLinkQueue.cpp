@@ -1,17 +1,16 @@
 //
-// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2019
+// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2026
 //
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
 //
 #include "td/utils/common.h"
-#include "td/utils/format.h"
 #include "td/utils/logging.h"
 #include "td/utils/MpscLinkQueue.h"
 #include "td/utils/port/thread.h"
 #include "td/utils/tests.h"
 
-class NodeX : public td::MpscLinkQueueImpl::Node {
+class NodeX final : public td::MpscLinkQueueImpl::Node {
  public:
   explicit NodeX(int value) : value_(value) {
   }
@@ -30,7 +29,7 @@ class NodeX : public td::MpscLinkQueueImpl::Node {
 };
 using QueueNode = td::MpscLinkQueueUniquePtrNode<NodeX>;
 
-QueueNode create_node(int value) {
+static QueueNode create_node(int value) {
   return QueueNode(td::make_unique<NodeX>(value));
 }
 
@@ -49,7 +48,7 @@ TEST(MpscLinkQueue, one_thread) {
     while (auto node = reader.read()) {
       v.push_back(node.value().value());
     }
-    LOG_CHECK((v == std::vector<int>{1, 2, 3, 4})) << td::format::as_array(v);
+    LOG_CHECK((v == std::vector<int>{1, 2, 3, 4})) << v;
 
     v.clear();
     queue.push(create_node(5));
@@ -57,7 +56,7 @@ TEST(MpscLinkQueue, one_thread) {
     while (auto node = reader.read()) {
       v.push_back(node.value().value());
     }
-    LOG_CHECK((v == std::vector<int>{5})) << td::format::as_array(v);
+    LOG_CHECK((v == std::vector<int>{5})) << v;
   }
 
   {
@@ -71,7 +70,7 @@ TEST(MpscLinkQueue, one_thread) {
     while (auto node = reader.read()) {
       v.push_back(node.value().value());
     }
-    LOG_CHECK((v == std::vector<int>{3, 2, 1, 0})) << td::format::as_array(v);
+    LOG_CHECK((v == std::vector<int>{3, 2, 1, 0})) << v;
   }
 }
 
@@ -113,4 +112,4 @@ TEST(MpscLinkQueue, multi_thread) {
     thread.join();
   }
 }
-#endif  //!TD_THREAD_UNSUPPORTED
+#endif

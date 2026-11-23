@@ -1,5 +1,5 @@
 //
-// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2019
+// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2026
 //
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
@@ -21,7 +21,7 @@ namespace td {
  * Interface for managing the internal logging of TDLib.
  * By default TDLib writes logs to stderr or an OS specific log and uses a verbosity level of 5.
  * These functions are deprecated since TDLib 1.4.0 in favor of the td::td_api::setLogVerbosityLevel,
- * td::td_api::setLogStream and other synchronous requests for managing the intrenal TDLib logging.
+ * td::td_api::setLogStream and other synchronous requests for managing the internal TDLib logging.
  */
 class Log {
  public:
@@ -38,11 +38,11 @@ class Log {
   static bool set_file_path(std::string file_path);
 
   /**
-   * Sets maximum size of the file to where the internal TDLib log is written before the file will be auto-rotated.
+   * Sets the maximum size of the file to where the internal TDLib log is written before the file will be auto-rotated.
    * Unused if log is not written to a file. Defaults to 10 MB.
    *
    * \deprecated Use synchronous td::td_api::setLogStream request instead.
-   * \param[in]  max_file_size Maximum size of the file to where the internal TDLib log is written before the file
+   * \param[in]  max_file_size The maximum size of the file to where the internal TDLib log is written before the file
    *                           will be auto-rotated. Should be positive.
    */
   static void set_max_file_size(std::int64_t max_file_size);
@@ -76,6 +76,7 @@ class Log {
    * The TDLib will crash as soon as callback returns.
    * By default the callback is not set.
    *
+   * \deprecated Use ClientManager::set_log_message_callback instead.
    * \param[in]  callback Callback that will be called when a fatal error happens.
    *                      Pass nullptr to remove the callback.
    */

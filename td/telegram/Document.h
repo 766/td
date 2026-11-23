@@ -1,5 +1,5 @@
 //
-// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2019
+// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2026
 //
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
@@ -26,7 +26,7 @@ struct Document {
   Document(Type type, FileId file_id) : type(type), file_id(file_id) {
   }
 
-  bool empty() const {
+  bool is_empty() const {
     return type == Type::Unknown;
   }
 
@@ -34,6 +34,10 @@ struct Document {
 
   void append_file_ids(const Td *td, vector<FileId> &file_ids) const;
 };
+
+bool operator==(const Document &lhs, const Document &rhs);
+
+bool operator!=(const Document &lhs, const Document &rhs);
 
 StringBuilder &operator<<(StringBuilder &string_builder, const Document::Type &document_type);
 

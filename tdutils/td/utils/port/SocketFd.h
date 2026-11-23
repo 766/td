@@ -1,5 +1,5 @@
 //
-// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2019
+// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2026
 //
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
@@ -7,11 +7,11 @@
 #pragma once
 
 #include "td/utils/port/config.h"
-
 #include "td/utils/port/detail/NativeFd.h"
 #include "td/utils/port/detail/PollableFd.h"
 #include "td/utils/port/IoSlice.h"
 #include "td/utils/port/IPAddress.h"
+#include "td/utils/port/platform.h"
 #include "td/utils/Slice.h"
 #include "td/utils/Span.h"
 #include "td/utils/Status.h"
@@ -33,9 +33,12 @@ class SocketFd {
   SocketFd();
   SocketFd(const SocketFd &) = delete;
   SocketFd &operator=(const SocketFd &) = delete;
-  SocketFd(SocketFd &&);
-  SocketFd &operator=(SocketFd &&);
+  SocketFd(SocketFd &&) noexcept;
+  SocketFd &operator=(SocketFd &&) noexcept;
   ~SocketFd();
+
+  Result<uint32> maximize_snd_buffer(uint32 max_size = 0);
+  Result<uint32> maximize_rcv_buffer(uint32 max_size = 0);
 
   static Result<SocketFd> open(const IPAddress &address) TD_WARN_UNUSED_RESULT;
 

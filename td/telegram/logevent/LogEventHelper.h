@@ -1,51 +1,41 @@
 //
-// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2019
+// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2026
 //
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
 //
 #pragma once
 
-#include "td/actor/PromiseFuture.h"
-
-#include "td/db/binlog/BinlogHelper.h"
-
 #include "td/telegram/Global.h"
-#include "td/telegram/TdDb.h"
 
 #include "td/utils/common.h"
-#include "td/utils/Status.h"
+#include "td/utils/Promise.h"
+#include "td/utils/Slice.h"
+#include "td/utils/StorerBase.h"
 #include "td/utils/Time.h"
 #include "td/utils/tl_helpers.h"
 
 namespace td {
 
-#define get_erase_logevent_promise(...) get_erase_logevent_promise_impl(__FILE__, __LINE__, __VA_ARGS__)
+struct LogEventIdWithGeneration {
+  uint64 log_event_id = 0;
+  uint64 generation = 0;
+};
 
-inline Promise<Unit> get_erase_logevent_promise_impl(const char *file, int line, uint64 logevent_id,
-                                                     Promise<Unit> promise = Promise<Unit>()) {
-  if (logevent_id == 0) {
-    return promise;
-  }
+void add_log_event(LogEventIdWithGeneration &log_event_id, const Storer &storer, uint32 type, Slice name);
 
-  return PromiseCreator::lambda([file, line, logevent_id, promise = std::move(promise)](Result<Unit> result) mutable {
-    if (!G()->close_flag()) {
-      binlog_erase(G()->get_td_db_impl(file, line)->get_binlog_impl(file, line), logevent_id);
-    }
+void delete_log_event(LogEventIdWithGeneration &log_event_id, uint64 generation, Slice name);
 
-    promise.set_result(std::move(result));
-  });
-}
+Promise<Unit> get_erase_log_event_promise(uint64 log_event_id, Promise<Unit> promise = Promise<Unit>());
 
 template <class StorerT>
 void store_time(double time_at, StorerT &storer) {
-  double server_time = storer.context()->server_time();
   if (time_at == 0) {
     store(-1.0, storer);
   } else {
     double time_left = max(time_at - Time::now(), 0.0);
     store(time_left, storer);
-    store(server_time, storer);
+    store(get_global_server_time(), storer);
   }
 }
 

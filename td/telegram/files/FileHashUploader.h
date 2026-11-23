@@ -1,5 +1,5 @@
 //
-// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2019
+// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2026
 //
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
@@ -9,6 +9,7 @@
 #include "td/telegram/files/FileLoaderActor.h"
 #include "td/telegram/files/FileLocation.h"
 #include "td/telegram/files/ResourceManager.h"
+#include "td/telegram/net/NetQuery.h"
 
 #include "td/actor/actor.h"
 
@@ -19,7 +20,7 @@
 
 namespace td {
 
-class FileHashUploader : public FileLoaderActor {
+class FileHashUploader final : public FileLoaderActor {
  public:
   class Callback {
    public:
@@ -27,28 +28,13 @@ class FileHashUploader : public FileLoaderActor {
     Callback(const Callback &) = delete;
     Callback &operator=(const Callback &) = delete;
     virtual ~Callback() = default;
-    virtual void on_ok(const FullRemoteFileLocation &locatioin) = 0;
+
+    virtual void on_ok(FullRemoteFileLocation location) = 0;
     virtual void on_error(Status status) = 0;
   };
 
   FileHashUploader(const FullLocalFileLocation &local, int64 size, unique_ptr<Callback> callback)
       : local_(local), size_(size), size_left_(size), callback_(std::move(callback)) {
-  }
-
-  void set_resource_manager(ActorShared<ResourceManager> resource_manager) override {
-    resource_manager_ = std::move(resource_manager);
-    send_closure(resource_manager_, &ResourceManager::update_resources, resource_state_);
-  }
-
-  void update_priority(int8 priority) override {
-    send_closure(resource_manager_, &ResourceManager::update_priority, priority);
-  }
-  void update_resources(const ResourceState &other) override {
-    if (stop_flag_) {
-      return;
-    }
-    resource_state_.update_slave(other);
-    loop();
   }
 
  private:
@@ -66,16 +52,33 @@ class FileHashUploader : public FileLoaderActor {
   bool stop_flag_ = false;
   Sha256State sha256_state_;
 
-  void start_up() override;
+  void set_resource_manager(ActorShared<ResourceManager> resource_manager) final {
+    resource_manager_ = std::move(resource_manager);
+    send_closure(resource_manager_, &ResourceManager::update_resources, resource_state_);
+  }
+
+  void update_priority(int8 priority) final {
+    send_closure(resource_manager_, &ResourceManager::update_priority, priority);
+  }
+
+  void update_resources(const ResourceState &other) final {
+    if (stop_flag_) {
+      return;
+    }
+    resource_state_.update_slave(other);
+    loop();
+  }
+
+  void start_up() final;
   Status init();
 
-  void loop() override;
+  void loop() final;
 
   Status loop_impl();
 
   Status loop_sha();
 
-  void on_result(NetQueryPtr net_query) override;
+  void on_result(NetQueryPtr net_query) final;
 
   Status on_result_impl(NetQueryPtr net_query);
 };

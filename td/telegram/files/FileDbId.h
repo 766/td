@@ -1,5 +1,5 @@
 //
-// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2019
+// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2026
 //
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
@@ -19,7 +19,7 @@ class FileDbId {
  public:
   FileDbId() = default;
 
-  explicit FileDbId(uint64 file_db_id) : id(file_db_id) {
+  explicit constexpr FileDbId(uint64 file_db_id) : id(file_db_id) {
   }
   template <class T1, typename = std::enable_if_t<std::is_convertible<T1, uint64>::value>>
   FileDbId(T1 file_db_id) = delete;
@@ -50,5 +50,9 @@ class FileDbId {
     return id != other.id;
   }
 };
+
+inline StringBuilder &operator<<(StringBuilder &sb, const FileDbId &file_db_id) {
+  return sb << "FileDbId{" << file_db_id.get() << "}";
+}
 
 }  // namespace td

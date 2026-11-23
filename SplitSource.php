@@ -30,19 +30,11 @@ function split_file($file, $chunks, $undo) {
         $new_files[] = "$file$n.cpp";
     }
 
-    $is_generated = (strpos($file, 'td/generate/') === 0);
-
-    $cmake_file = $is_generated ? 'td/generate/CMakeLists.txt' : 'CMakeLists.txt';
+    $cmake_file = 'CMakeLists.txt';
     $cmake = file_get_contents($cmake_file);
 
     $cmake_cpp_name = $cpp_name;
     $cmake_new_files = $new_files;
-    if ($is_generated) {
-        foreach ($cmake_new_files as &$file_ref) {
-            $file_ref = str_replace('td/generate', '${CMAKE_CURRENT_SOURCE_DIR}', $file_ref);
-        }
-        $cmake_cpp_name = str_replace('td/generate', '${CMAKE_CURRENT_SOURCE_DIR}', $cmake_cpp_name);
-    }
 
     if ($undo) {
         foreach ($new_files as $file) {
@@ -66,15 +58,16 @@ function split_file($file, $chunks, $undo) {
     }
 
     if (!file_exists($cpp_name)) {
-        echo "ERROR: skip unexisting file $cpp_name".PHP_EOL;
+        echo "ERROR: skip nonexistent file $cpp_name".PHP_EOL;
         return;
     }
 
     $lines = file($cpp_name);
     $depth = 0;
-    $target_depth = 1 + $is_generated;
+    $target_depth = 1;
     $is_static = false;
     $in_define = false;
+    $in_comment = false;
     $current = '';
     $common = '';
     $functions = array();
@@ -113,6 +106,17 @@ function split_file($file, $chunks, $undo) {
             continue;
         }
 
+        if ($in_comment && strpos($line, '*/') === 0) {
+            $in_comment = false;
+            continue;
+        }
+        if (strpos($line, '/*') === 0) {
+            $in_comment = true;
+        }
+        if ($in_comment) {
+            continue;
+        }
+
         if ($depth !== $target_depth) {
             $common .= $line;
             continue;
@@ -139,33 +143,32 @@ function split_file($file, $chunks, $undo) {
             $in_define = false;
         }
     }
-    if (!empty(trim($current))) {
+    $current = trim($current);
+    if (!empty($current)) {
         fwrite(STDERR, "ERROR: $current".PHP_EOL);
         exit();
     }
 
     if (count($functions) < $chunks) {
-        fwrite(STDERR, "ERROR: file is too small to be splitted more".PHP_EOL);
+        fwrite(STDERR, "ERROR: file is too small to be split more".PHP_EOL);
         return;
     }
 
     $deps = array();  // all functions from the same subarray must be in the same file
     $parents = array();
     foreach ($functions as $i => $f) {
-        if (preg_match_all('/(?J)(create_handler|create_net_actor)<(?<name>[A-Z][A-Za-z]*)>|'.
-                           '(?<name>[A-Z][A-Za-z]*) : public (Td::ResultHandler|NetActor|Request)|'.
+        if (preg_match_all('/(?J)create_handler<(?<name>[A-Z][A-Za-z]*)>|'.
+                           '(?<name>[A-Z][A-Za-z]*) (final )?: public (Td::ResultHandler|Request)|'.
                            '(CREATE_REQUEST|CREATE_NO_ARGS_REQUEST)[(](?<name>[A-Z][A-Za-z]*)|'.
                            '(?<name>complete_pending_preauthentication_requests)|'.
-                           '(Up|Down)load[a-zA-Z]*C(?<name>allback)|(up|down)load_[a-z_]*_c(?<name>allback)_|'.
+                           '(?<name>get_message_history_slice)|'.
+                           '(Up|Down)load(?!ManagerCallback)[a-zA-Z]+C(?<name>allback)|(up|down)load_[a-z_]*_c(?<name>allback)_|'.
                            '(?<name>LogEvent)[^sA]|'.
                            '(?<name>parse)[(]|'.
                            '(?<name>store)[(]/', $f, $matches, PREG_SET_ORDER)) {
             foreach ($matches as $match) {
                 $name = $match['name'];
                 if ($name === 'parse' || $name === 'store') {
-                    if ($is_generated) {
-                        continue;
-                    }
                     $name = 'LogEvent';
                 }
                 $deps[$name][] = $i;
@@ -188,7 +191,7 @@ function split_file($file, $chunks, $undo) {
             $set_sizes[$parent] = 0;
         }
         $sets[$parent] .= $f;
-        $set_sizes[$parent] += preg_match('/Td::~?Td/', $f) ? 1000000 : strlen($f);
+        $set_sizes[$parent] += strlen($f);
     }
     arsort($set_sizes);
 
@@ -204,7 +207,7 @@ function split_file($file, $chunks, $undo) {
         $new_content = $common.$namespace_begin.$f.$namespace_end;
 
         $std_methods = array();
-        preg_match_all('/std::[a-z_0-9]*/', $new_content, $std_methods);
+        preg_match_all('/std::[a-z_0-9]*|td::unique(?!_)/', $new_content, $std_methods);
         $std_methods = array_unique($std_methods[0]);
 
         $needed_std_headers = array();
@@ -215,26 +218,47 @@ function split_file($file, $chunks, $undo) {
             'std::uint32_t' => '',
             'std::int32_t' => '',
             'std::int64_t' => '',
+            'td::unique' => 'algorithm',
+            'std::count_if' => 'algorithm',
             'std::fill' => 'algorithm',
             'std::find' => 'algorithm',
+            'std::is_sorted' => 'algorithm',
+            'std::lower_bound' => 'algorithm',
             'std::max' => 'algorithm',
+            'std::merge' => 'algorithm',
             'std::min' => 'algorithm',
+            'std::partial_sort' => 'algorithm',
+            'std::partition' => 'algorithm',
             'std::remove' => 'algorithm',
             'std::reverse' => 'algorithm',
             'std::rotate' => 'algorithm',
             'std::sort' => 'algorithm',
+            'std::stable_sort' => 'algorithm',
+            'std::upper_bound' => 'algorithm',
+            'std::abs' => 'cmath',
+            'std::isfinite' => 'cmath',
+            'std::function' => 'functional',
+            'std::greater' => 'functional',
+            'std::reference_wrapper' => 'functional',
+            'std::make_move_iterator' => 'iterator',
             'std::numeric_limits' => 'limits',
+            'std::map' => 'map',
+            'std::multimap' => 'map',
             'std::make_shared' => 'memory',
             'std::shared_ptr' => 'memory',
+            'std::multiset' => 'set',
+            'std::set' => 'set',
+            'std::get' => 'tuple',
+            'std::make_tuple' => 'tuple',
             'std::tie' => 'tuple',
             'std::tuple' => 'tuple',
             'std::decay_t' => 'type_traits',
             'std::is_same' => 'type_traits',
+            'std::unordered_map' => 'unordered_map',
+            'std::unordered_set' => 'unordered_set',
             'std::make_pair' => 'utility',
             'std::pair' => 'utility',
-            'std::swap' => 'utility',
-            'std::unordered_map' => 'unordered_map',
-            'std::unordered_set' => 'unordered_set');
+            'std::swap' => 'utility');
         foreach ($type_headers as $type => $header) {
             if (in_array($type, $std_methods)) {
                 $std_methods = array_diff($std_methods, array($type));
@@ -257,53 +281,245 @@ function split_file($file, $chunks, $undo) {
             );
         }
 
-        if (!preg_match('/Td::~?Td/', $new_content)) {  // destructor Td::~Td needs to see definitions of all forward-declared classes
-            $td_methods = array(
-                'animations_manager[_(-][^.]|AnimationsManager[^;>]' => "AnimationsManager",
-                'audios_manager[_(-][^.]|AudiosManager' => "AudiosManager",
-                'auth_manager[_(-][^.]|AuthManager' => 'AuthManager',
-                'ConfigShared|shared_config[(]' => 'ConfigShared',
-                'contacts_manager[_(-][^.]|ContactsManager([^ ;.]| [^*])' => 'ContactsManager',
-                'documents_manager[_(-][^.]|DocumentsManager' => "DocumentsManager",
-                'file_reference_manager[_(-][^.]|FileReferenceManager|file_references[)]' => 'FileReferenceManager',
-                'file_manager[_(-][^.]|FileManager([^ ;.]| [^*])|update_file[)]' => 'files/FileManager',
-                'G[(][)]|Global[^A-Za-z]' => 'Global',
-                'HashtagHints' => 'HashtagHints',
-                'inline_queries_manager[_(-][^.]|InlineQueriesManager' => 'InlineQueriesManager',
-                'language_pack_manager[_(-][^.]|LanguagePackManager' => 'LanguagePackManager',
-                'get_erase_logevent_promise|parse_time|store_time' => 'logevent/LogEventHelper',
-                'messages_manager[_(-][^.]|MessagesManager' => 'MessagesManager',
-                'notification_manager[_(-][^.]|NotificationManager|notifications[)]' => 'NotificationManager',
-                'SecretChatActor' => 'SecretChatActor',
-                'secret_chats_manager[_(-][^.]|SecretChatsManager' => 'SecretChatsManager',
-                'stickers_manager[_(-][^.]|StickersManager' => 'StickersManager',
-                '[>](td_db[(][)]|get_td_db_impl[(])|TdDb[^A-Za-z]' => 'TdDb',
-                'top_dialog_manager[_(-][^.]|TopDialogManager' => 'TopDialogManager',
-                'updates_manager[_(-][^.]|UpdatesManager|get_difference[)]' => 'UpdatesManager',
-                'WebPageId(Hash)?' => 'WebPageId',
-                'web_pages_manager[_(-][^.]|WebPagesManager' => 'WebPagesManager');
+        $td_methods = array(
+            'AccentColorId' => 'AccentColorId',
+            'account_manager[_(-](?![.]get[(][)])|AccountManager[^;>]' => 'AccountManager',
+            'ActiveStoryState' => 'ActiveStoryState',
+            'AffiliateType' => 'AffiliateType',
+            'AgeVerificationParameters' => 'AgeVerificationParameters',
+            'AiComposeTone[^A-Z]' => 'AiComposeTone',
+            'AiComposeToneExample' => 'AiComposeToneExample',
+            'alarm_manager[_(-](?![.]get[(][)])|AlarmManager' => 'AlarmManager',
+            'animations_manager[_(-](?![.]get[(][)])|AnimationsManager[^;>]' => 'AnimationsManager',
+            'attach_menu_manager[_(-](?![.]get[(][)])|AttachMenuManager[^;>]' => 'AttachMenuManager',
+            'AuctionBidLevel' => 'AuctionBidLevel',
+            'audios_manager[_(-](?![.]get[(][)])|AudiosManager' => 'AudiosManager',
+            'auth_manager[_(-](?![.]get[(][)])|AuthManager' => 'AuthManager',
+            'AutoDownloadSettings|[a-z_]*auto_download_settings' => 'AutoDownloadSettings',
+            'autosave_manager[_(-](?![.]get[(][)])|AutosaveManager' => 'AutosaveManager',
+            'BackgroundId' => 'BackgroundId',
+            'background_manager[_(-](?![.]get[(][)])|BackgroundManager' => 'BackgroundManager',
+            'BackgroundType' => 'BackgroundType',
+            'Birthdate' => 'Birthdate',
+            'boost_manager[_(-](?![.]get[(][)])|BoostManager' => 'BoostManager',
+            'BotAccessSettings' => 'BotAccessSettings',
+            'bot_info_manager[_(-](?![.]get[(][)])|BotInfoManager' => 'BotInfoManager',
+            'BotMenuButton|[a-z_]*_menu_button' => 'BotMenuButton',
+            'send_bot_custom_query|answer_bot_custom_query|set_bot_updates_status' => 'BotQueries',
+            'bot_recommendation_manager[_(-](?![.]get[(][)])|BotRecommendationManager' => 'BotRecommendationManager',
+            'BotVerification' => 'BotVerification',
+            'BotVerifierSettings' => 'BotVerifierSettings',
+            'BusinessAwayMessage' => 'BusinessAwayMessage',
+            'BusinessBotRights' => 'BusinessBotRights',
+            'BusinessChatLink' => 'BusinessChatLink',
+            'BusinessConnectedBot' => 'BusinessConnectedBot',
+            'BusinessConnectionId' => 'BusinessConnectionId',
+            'business_connection_manager[_(-](?![.]get[(][)])|BusinessConnectionManager' => 'BusinessConnectionManager',
+            'BusinessGreetingMessage' => 'BusinessGreetingMessage',
+            'BusinessInfo|business_info' => 'BusinessInfo',
+            'BusinessIntro' => 'BusinessIntro',
+            'business_manager[_(-](?![.]get[(][)])|BusinessManager' => 'BusinessManager',
+            'BusinessRecipients' => 'BusinessRecipients',
+            'BusinessWorkHours' => 'BusinessWorkHours',
+            'callback_queries_manager[_(-](?![.]get[(][)])|CallbackQueriesManager' => 'CallbackQueriesManager',
+            'CallId' => 'CallId',
+            'call_manager[_(-](?![.]get[(][)])|CallManager' => 'CallManager',
+            'ChannelId' => 'ChannelId',
+            'channel_recommendation_manager[_(-](?![.]get[(][)])|ChannelRecommendationManager' => 'ChannelRecommendationManager',
+            'ChatId' => 'ChatId',
+            'chat_manager[_(-](?![.]get[(][)])|ChatManager([^ ;.]| [^*])' => 'ChatManager',
+            'common_dialog_manager[_(-](?![.]get[(][)])|CommonDialogManager' => 'CommonDialogManager',
+            'community_manager[_(-](?![.]get[(][)])|CommunityManager([^ ;.]| [^*])' => 'CommunityManager',
+            'connection_state_manager[_(-](?![.]get[(][)])|ConnectionStateManager' => 'ConnectionStateManager',
+            'country_info_manager[_(-](?![.]get[(][)])|CountryInfoManager' => 'CountryInfoManager',
+            'CurrencyAmount' => 'CurrencyAmount',
+            'CustomEmojiId' => 'CustomEmojiId',
+            'device_token_manager[_(-](?![.]get[(][)])|DeviceTokenManager' => 'DeviceTokenManager',
+            'DialogAction[^M]' => 'DialogAction',
+            'dialog_action_manager[_(-](?![.]get[(][)])|DialogActionManager' => 'DialogActionManager',
+            'DialogFilter[^A-Z]' => 'DialogFilter',
+            'DialogFilterId' => 'DialogFilterId',
+            'dialog_filter_manager[_(-](?![.]get[(][)])|DialogFilterManager' => 'DialogFilterManager',
+            'DialogId' => 'DialogId',
+            'dialog_invite_link_manager[_(-](?![.]get[(][)])|DialogInviteLinkManager' => 'DialogInviteLinkManager',
+            'DialogListId' => 'DialogListId',
+            'DialogLocation' => 'DialogLocation',
+            'dialog_manager[_(-](?![.]get[(][)])|DialogManager' => 'DialogManager',
+            'DialogParticipantFilter' => 'DialogParticipantFilter',
+            'dialog_participant_manager[_(-](?![.]get[(][)])|DialogParticipantManager' => 'DialogParticipantManager',
+            'DialogSource' => 'DialogSource',
+            'DiffText' => 'DiffText',
+            'DisallowedGiftsSettings' => 'DisallowedGiftsSettings',
+            'documents_manager[_(-](?![.]get[(][)])|DocumentsManager' => 'DocumentsManager',
+            'download_manager[_(-](?![.]get[(][)])|DownloadManager[^C]' => 'DownloadManager',
+            'DownloadManagerCallback' => 'DownloadManagerCallback',
+            'draft_message_manager[_(-](?![.]get[(][)])|DraftMessageManager' => 'DraftMessageManager',
+            'EmailVerification' => 'EmailVerification',
+            'EmojiGroup' => 'EmojiGroup',
+            'FactCheck' => 'FactCheck',
+            'file_reference_manager[_(-](?![.]get[(][)])|FileReferenceManager|file_references[)]' => 'FileReferenceManager',
+            'file_manager[_(-](?![.]get[(][)])|FileManager([^ ;.]| [^*])|update_file[)]' => 'files/FileManager',
+            'FolderId' => 'FolderId',
+            'FormattedDate' => 'FormattedDate',
+            'ForumTopicFullId' => 'ForumTopicFullId',
+            'ForumTopicId' => 'ForumTopicId',
+            'forum_topic_manager[_(-](?![.]get[(][)])|ForumTopicManager' => 'ForumTopicManager',
+            'game_manager[_(-](?![.]get[(][)])|GameManager' => 'GameManager',
+            'G[(][)]|Global[^A-Za-z]' => 'Global',
+            'GlobalPrivacySettings' => 'GlobalPrivacySettings',
+            'GroupCallJoinParameters' => 'GroupCallJoinParameters',
+            'GroupCallId' => 'GroupCallId',
+            'group_call_manager[_(-](?![.]get[(][)])|GroupCallManager' => 'GroupCallManager',
+            'GroupCallMessage[^A-Z]' => 'GroupCallMessage',
+            'GroupCallMessageLimit' => 'GroupCallMessageLimit',
+            'hashtag_hints[_(-](?![.]get[(][)])|HashtagHints' => 'HashtagHints',
+            'InlineMessageContent' => 'InlineMessageContent',
+            'inline_message_manager[_(-](?![.]get[(][)])|InlineMessageManager' => 'InlineMessageManager',
+            'inline_queries_manager[_(-](?![.]get[(][)])|InlineQueriesManager' => 'InlineQueriesManager',
+            'InputBusinessChatLink' => 'InputBusinessChatLink',
+            'InputGroupCall' => 'InputGroupCall',
+            'KeyboardButtonStyle' => 'KeyboardButtonStyle',
+            'language_pack_manager[_(-]|LanguagePackManager' => 'LanguagePackManager',
+            'link_manager[_(-](?![.]get[(][)])|LinkManager' => 'LinkManager',
+            'LogeventIdWithGeneration|add_log_event|delete_log_event|get_erase_log_event_promise|parse_time|store_time' => 'logevent/LogEventHelper',
+            'MessageContentUploadId' => 'MessageContentUploadId',
+            'MessageCopyOptions' => 'MessageCopyOptions',
+            'MessageCover' => 'MessageCover',
+            'MessageEffectId' => 'MessageEffectId',
+            'MessageForwardInfo|LastForwardedMessageInfo|forward_info' => 'MessageForwardInfo',
+            'MessageFullId' => 'MessageFullId',
+            'MessageId' => 'MessageId',
+            'message_import_manager[_(-](?![.]get[(][)])|MessageImportManager' => 'MessageImportManager',
+            'MessageLinkInfo' => 'MessageLinkInfo',
+            'message_query_manager[_(-](?![.]get[(][)])|MessageQueryManager' => 'MessageQueryManager',
+            'MessageQuote' => 'MessageQuote',
+            'MessageReaction|UnreadMessageReaction|[a-z_]*message[a-z_]*reaction|reload_paid_reaction_privacy|get_chosen_tags' => 'MessageReaction',
+            'MessageReactor' => 'MessageReactor',
+            'MessageSearchOffset' => 'MessageSearchOffset',
+            '[a-z_]*_message_sender' => 'MessageSender',
+            'MessageSendOptions' => 'MessageSendOptions',
+            'messages_manager[_(-](?![.]get[(][)])|MessagesManager' => 'MessagesManager',
+            'MessageThreadInfo' => 'MessageThreadInfo',
+            'MessageTopic' => 'MessageTopic',
+            'MessageTtl' => 'MessageTtl',
+            'MissingInvitee' => 'MissingInvitee',
+            'notification_manager[_(-](?![.]get[(][)])|NotificationManager|notifications[)]' => 'NotificationManager',
+            'notification_settings_manager[_(-](?![.]get[(][)])|NotificationSettingsManager' => 'NotificationSettingsManager',
+            'online_manager[_(-](?![.]get[(][)])|OnlineManager' => 'OnlineManager',
+            'option_manager[_(-](?![.]get[(][)])|OptionManager' => 'OptionManager',
+            'PaidReactionType' => 'PaidReactionType',
+            'Passkey[^A-Z]' => 'Passkey',
+            'password_manager[_(-](?![.]get[(][)])|PasswordManager' => 'PasswordManager',
+            'PeerColor[^A-Z]' => 'PeerColor',
+            'PeerColorCollectible' => 'PeerColorCollectible',
+            'people_nearby_manager[_(-](?![.]get[(][)])|PeopleNearbyManager' => 'PeopleNearbyManager',
+            'phone_number_manager[_(-](?![.]get[(][)])|PhoneNumberManager' => 'PhoneNumberManager',
+            'PhotoSizeSource' => 'PhotoSizeSource',
+            'poll_manager[_(-](?![.]get[(][)])|PollManager' => 'PollManager',
+            'PollOption[^A-Z]' => 'PollOption',
+            'privacy_manager[_(-](?![.]get[(][)])|PrivacyManager' => 'PrivacyManager',
+            'ProfileTab' => 'ProfileTab',
+            'promo_data_manager[_(-](?![.]get[(][)])|PromoDataManager' => 'PromoDataManager',
+            'PublicDialogType|get_public_dialog_type' => 'PublicDialogType',
+            'quick_reply_manager[_(-](?![.]get[(][)])|QuickReplyManager' => 'QuickReplyManager',
+            'ReactionListType|[a-z_]*_reaction_list_type' => 'ReactionListType',
+            'reaction_manager[_(-](?![.]get[(][)])|ReactionManager' => 'ReactionManager',
+            'ReactionNotificationSettings' => 'ReactionNotificationSettings',
+            'ReactionNotificationsFrom' => 'ReactionNotificationsFrom',
+            'ReactionType|[a-z_]*_reaction_type' => 'ReactionType',
+            'ReferralProgramInfo' => 'ReferralProgramInfo',
+            'referral_program_manager[_(-](?![.]get[(][)])|ReferralProgramManager' => 'ReferralProgramManager',
+            'ReferralProgramParameters' => 'ReferralProgramParameters',
+            'RequestActor|RequestOnceActor' => 'RequestActor',
+            'RichButtonStyle' => 'RuchButtonStyle',
+            'RichMessage[^M]' => 'RichMessage',
+            'RichMessageMedia' => 'RichMessageMedia',
+            'saved_messages_manager[_(-](?![.]get[(][)])|SavedMessagesManager' => 'SavedMessagesManager',
+            'ScopeNotificationSettings|[a-z_]*_scope_notification_settings' => 'ScopeNotificationSettings',
+            'SearchPostsFlood' => 'SearchPostsFlood',
+            'SecretChatActor' => 'SecretChatActor',
+            'secret_chats_manager[_(-]|SecretChatsManager' => 'SecretChatsManager',
+            'secure_manager[_(-](?![.]get[(][)])|SecureManager' => 'SecureManager',
+            'SentEmailCode' => 'SentEmailCode',
+            'SharedDialog' => 'SharedDialog',
+            'sponsored_message_manager[_(-](?![.]get[(][)])|SponsoredMessageManager' => 'SponsoredMessageManager',
+            'StarAmount' => 'StarAmount',
+            'StarGift[^A-Z]' => 'StarGift',
+            'StarGiftAttribute[^IR]' => 'StarGiftAttribute',
+            'StarGiftAttributeId' => 'StarGiftAttributeId',
+            'StarGiftAttributeRarity' => 'StarGiftAttributeRarity',
+            'StarGiftAuctionRound' => 'StarGiftAuctionRound',
+            'StarGiftAuctionState' => 'StarGiftAuctionState',
+            'StarGiftAuctionUserState' => 'StarGiftAuctionUserState',
+            'StarGiftBackground' => 'StarGiftBackground',
+            'StarGiftCollectionId' => 'StarGiftCollectionId',
+            'StarGiftId' => 'StarGiftId',
+            'star_gift_manager[_(-](?![.]get[(][)])|StarGiftManager' => 'StarGiftManager',
+            'StarGiftResalePrice' => 'StarGiftResalePrice',
+            'StarGiftSettings' => 'StarGiftSettings',
+            'star_manager[_(-](?![.]get[(][)])|StarManager' => 'StarManager',
+            'StarRating' => 'StarRating',
+            'StarSubscription[^P]' => 'StarSubscription',
+            'StarSubscriptionPricing' => 'StarSubscriptionPricing',
+            'state_manager[_(-](?![.]get[(][)])|StateManager' => 'StateManager',
+            'statistics_manager[_(-](?![.]get[(][)])|StatisticsManager' => 'StatisticsManager',
+            'StickerSetId' => 'StickerSetId',
+            'stickers_manager[_(-](?![.]get[(][)])|StickersManager' => 'StickersManager',
+            'storage_manager[_(-](?![.]get[(][)])|StorageManager' => 'StorageManager',
+            'StoryAlbum' => 'StoryAlbum',
+            'StoryAlbumFullId' => 'StoryAlbumFullId',
+            'StoryAlbumId' => 'StoryAlbumId',
+            'StoryId' => 'StoryId',
+            'StoryListId' => 'StoryListId',
+            'story_manager[_(-](?![.]get[(][)])|StoryManager' => 'StoryManager',
+            'SuggestedAction|[a-z_]*_suggested_action' => 'SuggestedAction',
+            'suggested_action_manager[_(-](?![.]get[(][)])|SuggestedActionManager' => 'SuggestedActionManager',
+            'SuggestedPost[^A-Z]' => 'SuggestedPost',
+            'SuggestedPostPrice' => 'SuggestedPostPrice',
+            'SynchronousRequests' => 'SynchronousRequests',
+            'TargetDialogTypes' => 'TargetDialogTypes',
+            'td_api' => 'td_api',
+            'td_db[(][)]|TdDb[^A-Za-z]' => 'TdDb',
+            'telegram_api' => 'telegram_api',
+            'TempPasswordState' => 'TempPasswordState',
+            'terms_of_service_manager[_(-](?![.]get[(][)])|TermsOfServiceManager' => 'TermsOfServiceManager',
+            'theme_manager[_(-](?![.]get[(][)])|ThemeManager' => 'ThemeManager',
+            'ThemeSettings' => 'ThemeSettings',
+            'time_zone_manager[_(-](?![.]get[(][)])|TimeZoneManager' => 'TimeZoneManager',
+            'ToDoCompletion' => 'ToDoCompletion',
+            'ToDoItem' => 'ToDoItem',
+            'ToDoList' => 'ToDoList',
+            'TonAmount' => 'TonAmount',
+            'ton_wallet_manager[_(-](?![.]get[(][)])|TonWalletManager' => 'TonWalletManager',
+            'TopDialogCategory|get_top_dialog_category' => 'TopDialogCategory',
+            'top_dialog_manager[_(-](?![.]get[(][)])|TopDialogManager' => 'TopDialogManager',
+            'translation_manager[_(-](?![.]get[(][)])|TranslationManager' => 'TranslationManager',
+            'transcription_manager[_(-](?![.]get[(][)])|TranscriptionManager' => 'TranscriptionManager',
+            'updates_manager[_(-](?![.]get[(][)])|UpdatesManager|get_difference[)]|updateSentMessage|dummyUpdate' => 'UpdatesManager',
+            'UserId' => 'UserId',
+            'user_manager[_(-](?![.]get[(][)])|UserManager([^ ;.]| [^*])' => 'UserManager',
+            'UserStarGift' => 'UserStarGift',
+            'video_notes_manager[_(-](?![.]get[(][)])|VideoNotesManager' => 'VideoNotesManager',
+            'videos_manager[_(-](?![.]get[(][)])|VideosManager' => 'VideosManager',
+            'voice_notes_manager[_(-](?![.]get[(][)])|VoiceNotesManager' => 'VoiceNotesManager',
+            'web_app_manager[_(-](?![.]get[(][)])|WebAppManager' => 'WebAppManager',
+            'WebAppOpenParameters' => 'WebAppOpenParameters',
+            'web_browser_manager[_(-](?![.]get[(][)])|WebBrowserManager' => 'WebBrowserManager',
+            'WebBrowserSettings' => 'WebBrowserSettings',
+            'WebDomainException' => 'WebDomainException',
+            'WebPageId(Hash)?' => 'WebPageId',
+            'web_pages_manager[_(-](?![.]get[(][)])|WebPagesManager' => 'WebPagesManager',
+            'welcome_message_manager[_(-](?![.]get[(][)])|WelcomeMessageManager' => 'WelcomeMessageManager');
 
-            foreach ($td_methods as $pattern => $header) {
-                if (strpos($cpp_name, $header) !== false) {
-                    continue;
-                }
-
-                $include_name = '#include "td/telegram/'.$header.'.h"';
-                if (strpos($new_content, $include_name) !== false && preg_match('/'.$pattern.'/', str_replace($include_name, '', $new_content)) === 0) {
-                    $new_content = str_replace($include_name, '', $new_content);
-                }
+        foreach ($td_methods as $pattern => $header) {
+            if (strpos($cpp_name, $header) !== false) {
+                continue;
             }
-        } else {
-            $new_content = preg_replace_callback(
-                '|#include "[a-z_A-Z/0-9.]*"|',
-                function ($matches) {
-                    if (strpos($matches[0], "Manager") !== false || strpos($matches[0], "HashtagHints") !== false || strpos($matches[0], "Td.h") !== false) {
-                        return $matches[0];
-                    }
-                    return '';
-                },
-                $new_content
-            );
+
+            $include_name = '#include "td/telegram/'.$header.'.h"';
+            if (strpos($new_content, $include_name) !== false && preg_match('/[^a-zA-Z0-9_]('.$pattern.')/', str_replace($include_name, '', $new_content)) === 0) {
+                $new_content = str_replace($include_name, '', $new_content);
+            }
         }
 
         if (!file_exists($new_files[$n]) || file_get_contents($new_files[$n]) !== $new_content) {
@@ -314,19 +530,22 @@ function split_file($file, $chunks, $undo) {
 }
 
 if (in_array('--help', $argv) || in_array('-h', $argv)) {
-    echo "Usage: php SplitSource.php [OPTION]...\nSplits some source files to reduce maximum RAM needed for compiling a single file.\n  -u, --undo Undo all source code changes.\n  -h, --help Show this help.\n";
+    echo "Usage: php SplitSource.php [OPTION]...\n".
+         "Splits some source files to reduce a maximum amount of RAM needed for compiling a single file.\n".
+         "  -u, --undo Undo all source code changes.\n".
+         "  -h, --help Show this help.\n";
     exit(2);
 }
 
 $undo = in_array('--undo', $argv) || in_array('-u', $argv);
-$files = array('td/telegram/ContactsManager' => 20,
+$files = array('td/telegram/ChatManager' => 10,
                'td/telegram/MessagesManager' => 50,
                'td/telegram/NotificationManager' => 10,
+               'td/telegram/Requests' => 50,
                'td/telegram/StickersManager' => 10,
-               'td/telegram/Td' => 50,
-               'td/generate/auto/td/telegram/td_api' => 10,
-               'td/generate/auto/td/telegram/td_api_json' => 10,
-               'td/generate/auto/td/telegram/telegram_api' => 10);
+               'td/telegram/StoryManager' => 10,
+               'td/telegram/UpdatesManager' => 10,
+               'td/telegram/UserManager' => 10);
 
 foreach ($files as $file => $chunks) {
     split_file($file, $chunks, $undo);

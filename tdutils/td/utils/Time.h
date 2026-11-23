@@ -1,5 +1,5 @@
 //
-// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2019
+// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2026
 //
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
@@ -7,7 +7,6 @@
 #pragma once
 
 #include "td/utils/common.h"
-#include "td/utils/port/Clocks.h"
 
 namespace td {
 
@@ -28,6 +27,10 @@ class Time {
     // As an alternative we may say that now_cached is a thread local copy of now
     return now();
   }
+  static double now_unadjusted();
+
+  // Used for testing. After jump_in_future(at) is called, now() >= at.
+  static void jump_in_future(double at);
 };
 
 inline void relax_timeout_at(double *timeout, double new_timeout) {
@@ -54,27 +57,24 @@ class Timestamp {
   static Timestamp at(double timeout) {
     return Timestamp{timeout};
   }
-  static Timestamp at_unix(double timeout) {
-    return Timestamp{timeout - td::Clocks::system() + Time::now()};
+
+  static Timestamp in(double timeout, Timestamp now = now_cached()) {
+    return Timestamp{now.at() + timeout};
   }
 
-  static Timestamp in(double timeout) {
-    return Timestamp{Time::now_cached() + timeout};
+  bool is_in_past(Timestamp now) const {
+    return at_ <= now.at();
   }
-
   bool is_in_past() const {
-    return at_ <= Time::now_cached();
+    return is_in_past(now_cached());
   }
 
-  explicit operator bool() const {
+  explicit operator bool() const noexcept {
     return at_ > 0;
   }
 
   double at() const {
     return at_;
-  }
-  double at_unix() const {
-    return at_ + Clocks::system() - Time::now();
   }
 
   double in() const {
@@ -99,14 +99,8 @@ class Timestamp {
   }
 };
 
-template <class StorerT>
-void store(const Timestamp &timestamp, StorerT &storer) {
-  storer.store_binary(timestamp.at() - Time::now() + Clocks::system());
-}
-
-template <class ParserT>
-void parse(Timestamp &timestamp, ParserT &parser) {
-  timestamp = Timestamp::in(parser.fetch_double() - Clocks::system());
+inline bool operator<(const Timestamp &a, const Timestamp &b) {
+  return a.at() < b.at();
 }
 
 }  // namespace td

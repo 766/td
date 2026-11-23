@@ -1,12 +1,10 @@
 //
-// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2019
+// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2026
 //
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
 //
 #pragma once
-
-#include "td/utils/port/config.h"
 
 #include "td/utils/common.h"
 #include "td/utils/Slice.h"
@@ -23,6 +21,7 @@ namespace td {
 
 Result<string> idn_to_ascii(CSlice host);
 
+class ServerSocketFd;
 class SocketFd;
 
 class IPAddress {
@@ -39,11 +38,20 @@ class IPAddress {
   void set_port(int port);
 
   uint32 get_ipv4() const;
-  Slice get_ipv6() const;
-  Slice get_ip_str() const;
+  string get_ipv6() const;
+
+  // returns result in a static thread-local buffer, which may be overwritten by any subsequent method call
+  CSlice get_ip_str() const;
+
+  // returns IP address as a host, i.e. IPv4 or [IPv6]
+  string get_ip_host() const;
+
+  static string ipv4_to_str(uint32 ipv4);
+  static string ipv6_to_str(Slice ipv6);
 
   IPAddress get_any_addr() const;
 
+  static Result<IPAddress> get_ip_address(CSlice host);  // host must be any IPv4 or IPv6
   static Result<IPAddress> get_ipv4_address(CSlice host);
   static Result<IPAddress> get_ipv6_address(CSlice host);
 
@@ -54,7 +62,10 @@ class IPAddress {
   Status init_host_port(CSlice host, CSlice port, bool prefer_ipv6 = false) TD_WARN_UNUSED_RESULT;
   Status init_host_port(CSlice host_port) TD_WARN_UNUSED_RESULT;
   Status init_socket_address(const SocketFd &socket_fd) TD_WARN_UNUSED_RESULT;
+  Status init_socket_address(const ServerSocketFd &server_socket_fd) TD_WARN_UNUSED_RESULT;
   Status init_peer_address(const SocketFd &socket_fd) TD_WARN_UNUSED_RESULT;
+
+  void clear_ipv6_interface();
 
   friend bool operator==(const IPAddress &a, const IPAddress &b);
   friend bool operator<(const IPAddress &a, const IPAddress &b);
@@ -63,8 +74,6 @@ class IPAddress {
   const sockaddr *get_sockaddr() const;
   size_t get_sockaddr_len() const;
   int get_address_family() const;
-  static CSlice ipv4_to_str(uint32 ipv4);
-  static CSlice ipv6_to_str(Slice ipv6);
   Status init_sockaddr(sockaddr *addr);
   Status init_sockaddr(sockaddr *addr, socklen_t len) TD_WARN_UNUSED_RESULT;
 
@@ -83,6 +92,6 @@ class IPAddress {
   void init_ipv6_any();
 };
 
-StringBuilder &operator<<(StringBuilder &builder, const IPAddress &address);
+StringBuilder &operator<<(StringBuilder &string_builder, const IPAddress &address);
 
 }  // namespace td

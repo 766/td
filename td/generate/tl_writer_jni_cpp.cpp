@@ -1,5 +1,5 @@
 //
-// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2019
+// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2026
 //
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
@@ -10,6 +10,21 @@
 #include <cstdio>
 
 namespace td {
+
+std::string TD_TL_writer_jni_cpp::gen_output_begin_once() const {
+#define DEFINE_STR_VALUE_IMPL(x) #x
+#define DEFINE_STR_VALUE(x) DEFINE_STR_VALUE_IMPL(x)
+  return TD_TL_writer_cpp::gen_output_begin_once() +
+         "\nconst char *&get_package_name_ref() {\n"
+         "  static const char *package_name = \"Package name must be initialized first\";\n"
+         "  return package_name;\n"
+         "}\n"
+         "\nconst char *get_git_commit_hash() {\n"
+         "  return \"" DEFINE_STR_VALUE(GIT_COMMIT_HASH) "\";\n"
+         "}\n";
+#undef DEFINE_STR_VALUE
+#undef DEFINE_STR_VALUE_IMPL
+}
 
 bool TD_TL_writer_jni_cpp::is_built_in_simple_type(const std::string &name) const {
   return name == "Bool" || name == "Int32" || name == "Int53" || name == "Int64" || name == "Double" ||
@@ -57,7 +72,7 @@ std::string TD_TL_writer_jni_cpp::gen_base_tl_class_name() const {
 }
 
 std::string TD_TL_writer_jni_cpp::gen_class_begin(const std::string &class_name, const std::string &base_class_name,
-                                                  bool is_proxy) const {
+                                                  bool is_proxy, const tl::tl_tree *result) const {
   return "\n"
          "jclass " +
          class_name + "::Class;\n";
@@ -83,10 +98,10 @@ std::string TD_TL_writer_jni_cpp::gen_vector_fetch(std::string field_name, const
 
   std::string fetch_object = "jni::fetch_object(env, p, " + field_name + "fieldID)";
   std::string array_type;
-  if (vector_type == "std::int32_t") {
+  if (vector_type == "int32") {
     array_type = "jintArray";
   }
-  if (vector_type == "std::int64_t") {
+  if (vector_type == "int53" || vector_type == "int64") {
     array_type = "jlongArray";
   }
   if (vector_type == "double") {
@@ -94,27 +109,26 @@ std::string TD_TL_writer_jni_cpp::gen_vector_fetch(std::string field_name, const
   }
 
   if (!array_type.empty()) {
-    return "jni::fetch_vector(env, (" + array_type + ")" + fetch_object + ");";
+    return "jni::fetch_vector(env, (" + array_type + ")" + fetch_object + ")";
   }
 
   std::string template_type;
-  if (vector_type == string_type) {
-    template_type = "std::string";
-  } else if (vector_type.compare(0, 11, "std::vector") == 0) {
+  if (vector_type == "string") {
+    template_type = "string";
+  } else if (vector_type.compare(0, 5, "array") == 0) {
     const tl::tl_tree_type *child = static_cast<const tl::tl_tree_type *>(t->children[0]);
     template_type = gen_type_name(child);
     if (template_type.compare(0, 10, "object_ptr") == 0) {
       template_type = gen_main_class_name(child->type);
     }
-    template_type = "std::vector<" + template_type + ">";
-  } else if (vector_type == bytes_type) {
-    std::fprintf(stderr, "Vector of Bytes is not supported\n");
-    assert(false);
+    template_type = "array<" + template_type + ">";
+  } else if (vector_type == "bytes") {
+    template_type = "jbyteArray";
   } else {
     assert(vector_type.compare(0, 10, "object_ptr") == 0);
     template_type = gen_main_class_name(t->type);
   }
-  return "jni::FetchVector<" + template_type + ">::fetch(env, (jobjectArray)" + fetch_object + ");";
+  return "jni::FetchVector<" + template_type + ">::fetch(env, (jobjectArray)" + fetch_object + ")";
 }
 
 std::string TD_TL_writer_jni_cpp::gen_type_fetch(const std::string &field_name, const tl::tl_tree_type *tree_type,
@@ -127,7 +141,7 @@ std::string TD_TL_writer_jni_cpp::gen_type_fetch(const std::string &field_name, 
 
   if (!(tree_type->flags & tl::FLAG_BARE)) {
     if (is_type_bare(t)) {
-      if (field_name != "") {
+      if (!field_name.empty()) {
         std::fprintf(stderr, "Do not use non-bare fields with bare type %s\n", name.c_str());
         //        assert(false);
       }
@@ -175,11 +189,11 @@ std::string TD_TL_writer_jni_cpp::gen_type_fetch(const std::string &field_name, 
     const tl::tl_tree_type *child = static_cast<const tl::tl_tree_type *>(tree_type->children[0]);
     res = gen_vector_fetch(field_name, child, vars, parser_type);
   } else {
-    if (field_name == "") {
+    if (field_name.empty()) {
       return gen_main_class_name(tree_type->type) + "::fetch(env, p)";
     }
     res = "jni::fetch_tl_object<" + gen_main_class_name(tree_type->type) + ">(env, jni::fetch_object(env, p, " +
-          field_name + "fieldID));";
+          field_name + "fieldID))";
   }
   return res_begin + res;
 }
@@ -248,8 +262,8 @@ std::string TD_TL_writer_jni_cpp::gen_vector_store(const std::string &field_name
   if (vector_type == "bool") {
     assert(false);  // TODO
   }
-  if (vector_type == "std::int32_t" || vector_type == "std::int64_t" || vector_type == "double" ||
-      vector_type == string_type || vector_type.compare(0, 11, "std::vector") == 0 ||
+  if (vector_type == "int32" || vector_type == "int53" || vector_type == "int64" || vector_type == "double" ||
+      vector_type == "string" || vector_type.compare(0, 5, "array") == 0 ||
       vector_type.compare(0, 10, "object_ptr") == 0) {
     return "{ "
            "auto arr_tmp_ = jni::store_vector(env, " +
@@ -262,7 +276,7 @@ std::string TD_TL_writer_jni_cpp::gen_vector_store(const std::string &field_name
            "env->DeleteLocalRef(arr_tmp_); "
            "} }";
   }
-  if (vector_type == bytes_type) {
+  if (vector_type == "bytes") {
     std::fprintf(stderr, "Vector of Bytes is not supported\n");
     assert(false);
   }
@@ -289,6 +303,15 @@ std::string TD_TL_writer_jni_cpp::gen_type_store(const std::string &field_name, 
     }
   } else {
     assert(is_type_bare(t));
+  }
+
+  if (storer_type == 1) {
+    auto pretty_field_name = get_pretty_field_name(field_name);
+    if (pretty_field_name == "privateKey" || pretty_field_name == "secretPhrase" ||
+        pretty_field_name == "newEncryptionKey" || pretty_field_name == "databaseEncryptionKey" ||
+        pretty_field_name == "encryptionKey") {
+      return "s.store_field(\"" + pretty_field_name + "\", \"[REDACTED]\");";
+    }
   }
 
   std::string res;
@@ -323,8 +346,8 @@ std::string TD_TL_writer_jni_cpp::gen_type_store(const std::string &field_name, 
     res = gen_vector_store(field_name, child, vars, storer_type);
   } else {
     if (storer_type == 1) {
-      res = "if (" + field_name + " == nullptr) { s.store_field(\"" + get_pretty_field_name(field_name) +
-            "\", \"null\"); } else { " + field_name + "->store(s, \"" + get_pretty_field_name(field_name) + "\"); }";
+      res = "s.store_object_field(\"" + get_pretty_field_name(field_name) + "\", static_cast<const BaseObject *>(" +
+            field_name + ".get()));";
     } else {
       res = "if (" + field_name + " != nullptr) { jobject next; " + field_name +
             "->store(env, next); if (next) { env->SetObjectField(s, " + field_name +
@@ -335,7 +358,8 @@ std::string TD_TL_writer_jni_cpp::gen_type_store(const std::string &field_name, 
   return res;
 }
 
-std::string TD_TL_writer_jni_cpp::gen_field_store(const tl::arg &a, std::vector<tl::var_description> &vars, bool flat,
+std::string TD_TL_writer_jni_cpp::gen_field_store(const tl::arg &a, const std::vector<tl::arg> &args,
+                                                  std::vector<tl::var_description> &vars, bool flat,
                                                   int storer_type) const {
   std::string field_name = gen_field_name(a.name);
   std::string shift = storer_type == 1 ? "    " : "  ";
@@ -380,10 +404,10 @@ std::string TD_TL_writer_jni_cpp::gen_get_id(const std::string &class_name, std:
 std::string TD_TL_writer_jni_cpp::gen_fetch_function_begin(const std::string &parser_name,
                                                            const std::string &class_name,
                                                            const std::string &parent_class_name, int arity,
-                                                           std::vector<tl::var_description> &vars,
+                                                           int field_count, std::vector<tl::var_description> &vars,
                                                            int parser_type) const {
   for (std::size_t i = 0; i < vars.size(); i++) {
-    assert(vars[i].is_stored == false);
+    assert(!vars[i].is_stored);
   }
 
   std::string fetched_type = "object_ptr<" + class_name + "> ";
@@ -392,14 +416,22 @@ std::string TD_TL_writer_jni_cpp::gen_fetch_function_begin(const std::string &pa
 
   assert(parser_type != 0);
 
-  return "\n" + returned_type + class_name + "::fetch(" + parser_name + " &p) {\n" +
-         (parser_type == -1 ? ""
-                            : "  if (p == nullptr) return nullptr;\n"
-                              "  " +
-                                  fetched_type + "res = make_object<" + class_name + ">();\n");
+  std::string result = "\n" + returned_type + class_name + "::fetch(" + parser_name + " &p) {\n";
+  if (parser_type != -1) {
+    result += "  if (p == nullptr) return nullptr;\n";
+    if (field_count == 0 && vars.empty()) {
+      result += "  return make_object<" + class_name + ">();\n";
+    } else {
+      result +=
+          "  init_jni_vars(env);\n"
+          "  " +
+          fetched_type + "res = make_object<" + class_name + ">();\n";
+    }
+  }
+  return result;
 }
 
-std::string TD_TL_writer_jni_cpp::gen_fetch_function_end(bool has_parent, int field_num,
+std::string TD_TL_writer_jni_cpp::gen_fetch_function_end(bool has_parent, int field_count,
                                                          const std::vector<tl::var_description> &vars,
                                                          int parser_type) const {
   for (std::size_t i = 0; i < vars.size(); i++) {
@@ -408,7 +440,7 @@ std::string TD_TL_writer_jni_cpp::gen_fetch_function_end(bool has_parent, int fi
 
   assert(parser_type != 0);
 
-  if (parser_type == -1) {
+  if (parser_type == -1 || field_count == 0) {
     return "}\n";
   }
 
@@ -422,7 +454,7 @@ std::string TD_TL_writer_jni_cpp::gen_fetch_function_result_begin(const std::str
                                                                   const tl::tl_tree *result) const {
   return "\n" + class_name + "::ReturnType " + class_name + "::fetch_result(" + parser_name +
          " &p) {\n"
-         "  if (p == nullptr) return ReturnType();\n" +
+         "  if (p == nullptr) return ReturnType();\n"
          "  return ";
 }
 
@@ -458,7 +490,8 @@ std::string TD_TL_writer_jni_cpp::gen_store_function_begin(const std::string &st
          "void " +
          class_name + "::store(" + storer_name + " &s" +
          std::string(storer_type <= 0 ? "" : ", const char *field_name") + ") const {\n" +
-         (storer_type <= 0 ? "  s = env->AllocObject(Class);\n"
+         (storer_type <= 0 ? "  init_jni_vars(env);\n"
+                             "  s = env->AllocObject(Class);\n"
                              "  if (!s) { return; }\n"
                            : "  if (!LOG_IS_STRIPPED(ERROR)) {\n"
                              "    s.store_class_begin(field_name, \"" +
@@ -467,7 +500,8 @@ std::string TD_TL_writer_jni_cpp::gen_store_function_begin(const std::string &st
 
 std::string TD_TL_writer_jni_cpp::gen_fetch_switch_begin() const {
   return "  if (p == nullptr) { return nullptr; }\n"
-         "  switch (env->CallIntMethod(p, jni::GetConstructorID)) {\n";
+         "  jint constructor = env->CallIntMethod(p, jni::GetConstructorID);"
+         "  switch (constructor) {\n";
 }
 
 std::string TD_TL_writer_jni_cpp::gen_fetch_switch_case(const tl::tl_combinator *t, int arity) const {
@@ -480,7 +514,7 @@ std::string TD_TL_writer_jni_cpp::gen_fetch_switch_case(const tl::tl_combinator 
 
 std::string TD_TL_writer_jni_cpp::gen_fetch_switch_end() const {
   return "    default:\n"
-         "      LOG(WARNING) << \"Unknown constructor found\";\n"
+         "      LOG(WARNING) << \"Unknown Java API constructor found \" << format::as_hex(constructor);\n"
          "      return nullptr;\n"
          "  }\n";
 }
@@ -522,7 +556,7 @@ std::string TD_TL_writer_jni_cpp::gen_basic_java_class_name(std::string name) co
 }
 
 std::string TD_TL_writer_jni_cpp::gen_java_class_name(std::string name) const {
-  return "(PSLICE() << package_name << \"/TdApi$" + gen_basic_java_class_name(name) + "\").c_str()";
+  return "(PSLICE() << get_package_name_ref() << \"/TdApi$" + gen_basic_java_class_name(name) + "\").c_str()";
 }
 
 std::string TD_TL_writer_jni_cpp::gen_type_signature(const tl::tl_tree_type *tree_type) const {
@@ -562,18 +596,19 @@ std::string TD_TL_writer_jni_cpp::gen_additional_function(const std::string &fun
       "\n"
       "void " +
       class_name + "::" + function_name +
-      "(JNIEnv *env, const char *package_name) {\n"
-      "  " +
+      "(JNIEnv *env) {\n"
+      "  static bool is_inited = [&] {\n"
+      "    " +
       class_name_class + " = jni::get_jclass(env, " + gen_java_class_name(gen_class_name(t->name)) + ");\n";
 
-  if (t->args.size()) {
+  if (!t->args.empty()) {
     for (std::size_t i = 0; i < t->args.size(); i++) {
       const tl::arg &a = t->args[i];
       assert(a.type->get_type() == tl::NODE_TYPE_TYPE);
       const tl::tl_tree_type *tree_type = static_cast<tl::tl_tree_type *>(a.type);
 
       std::string field_name = gen_field_name(a.name);
-      assert(field_name.size());
+      assert(!field_name.empty());
       std::string java_field_name = gen_java_field_name(std::string(field_name, 0, field_name.size() - 1));
 
       std::string type_signature = gen_type_signature(tree_type);
@@ -583,7 +618,7 @@ std::string TD_TL_writer_jni_cpp::gen_additional_function(const std::string &fun
         std::string new_type_signature = "(PSLICE()";
         std::size_t pos = type_signature.find("%PACKAGE_NAME%");
         while (pos != std::string::npos) {
-          new_type_signature += " << \"" + type_signature.substr(0, pos) + "\" << package_name";
+          new_type_signature += " << \"" + type_signature.substr(0, pos) + "\" << get_package_name_ref()";
           type_signature = type_signature.substr(pos + 14);
           pos = type_signature.find("%PACKAGE_NAME%");
         }
@@ -592,11 +627,15 @@ std::string TD_TL_writer_jni_cpp::gen_additional_function(const std::string &fun
         }
         type_signature = new_type_signature + ").c_str()";
       }
-      res += "  " + field_name + "fieldID = jni::get_field_id(env, " + class_name_class + ", \"" + java_field_name +
+      res += "    " + field_name + "fieldID = jni::get_field_id(env, " + class_name_class + ", \"" + java_field_name +
              "\", " + type_signature + ");\n";
     }
   }
-  res += "}\n";
+  res +=
+      "    return true;\n"
+      "  }();\n"
+      "  (void)is_inited;\n"
+      "}\n";
   return res;
 }
 
@@ -609,9 +648,14 @@ std::string TD_TL_writer_jni_cpp::gen_additional_proxy_function_begin(const std:
   return "\n"
          "void " +
          class_name + "::" + function_name +
-         "(JNIEnv *env, const char *package_name) {\n"
-         "  Class = jni::get_jclass(env, " +
-         gen_java_class_name(class_name) + ");\n";
+         "(JNIEnv *env) {\n"
+         "  static bool is_inited = [&] {\n"
+         "    Class = jni::get_jclass(env, " +
+         gen_java_class_name(class_name) +
+         ");\n"
+         "    return true;\n"
+         "  }();\n"
+         "  (void)is_inited;\n";
 }
 
 std::string TD_TL_writer_jni_cpp::gen_additional_proxy_function_case(const std::string &function_name,
@@ -619,7 +663,7 @@ std::string TD_TL_writer_jni_cpp::gen_additional_proxy_function_case(const std::
                                                                      const std::string &class_name, int arity) const {
   assert(function_name == "init_jni_vars");
   assert(arity == 0);
-  return "  " + class_name + "::" + function_name + "(env, package_name);\n";
+  return "";
 }
 
 std::string TD_TL_writer_jni_cpp::gen_additional_proxy_function_case(const std::string &function_name,
@@ -628,7 +672,7 @@ std::string TD_TL_writer_jni_cpp::gen_additional_proxy_function_case(const std::
                                                                      bool is_function) const {
   assert(function_name == "init_jni_vars");
   assert(arity == 0);
-  return "  " + gen_class_name(t->name) + "::" + function_name + "(env, package_name);\n";
+  return "";
 }
 
 std::string TD_TL_writer_jni_cpp::gen_additional_proxy_function_end(const std::string &function_name,

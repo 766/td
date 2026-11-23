@@ -1,5 +1,5 @@
 //
-// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2019
+// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2026
 //
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
@@ -8,10 +8,12 @@
 
 #include "td/utils/format.h"
 #include "td/utils/logging.h"
-#include "td/utils/Status.h"
+#include "td/utils/SliceBuilder.h"
 
 #if TD_PORT_POSIX
 #include <fcntl.h>
+#include <sys/socket.h>
+#include <sys/types.h>
 #include <unistd.h>
 #endif
 
@@ -21,6 +23,8 @@
 #endif
 
 namespace td {
+
+int VERBOSITY_NAME(fd) = VERBOSITY_NAME(DEBUG) + 9;
 
 #if TD_FD_DEBUG
 class FdSet {
@@ -34,7 +38,7 @@ class FdSet {
     }
     std::unique_lock<std::mutex> guard(mutex_);
     if (fds_.count(fd) >= 1) {
-      LOG(FATAL) << "Create duplicated fd: " << fd;
+      LOG(FATAL) << "Create duplicate fd: " << fd;
     }
     fds_.insert(fd);
   }
@@ -104,7 +108,7 @@ FdSet &get_fd_set() {
 
 Status NativeFd::validate() const {
 #if TD_FD_DEBUG
-  return get_fd_set().validate(fd_.get());
+  return get_fd_set().validate(fd_);
 #else
   return Status::OK();
 #endif
@@ -113,13 +117,13 @@ Status NativeFd::validate() const {
 NativeFd::NativeFd(Fd fd) : fd_(fd) {
   VLOG(fd) << *this << " create";
 #if TD_FD_DEBUG
-  get_fd_set().on_create_fd(fd_.get());
+  get_fd_set().on_create_fd(fd_);
 #endif
 }
 
 NativeFd::NativeFd(Fd fd, bool nolog) : fd_(fd) {
 #if TD_FD_DEBUG
-  get_fd_set().on_create_fd(fd_.get());
+  get_fd_set().on_create_fd(fd_);
 #endif
 }
 
@@ -127,18 +131,26 @@ NativeFd::NativeFd(Fd fd, bool nolog) : fd_(fd) {
 NativeFd::NativeFd(Socket socket) : fd_(reinterpret_cast<Fd>(socket)), is_socket_(true) {
   VLOG(fd) << *this << " create";
 #if TD_FD_DEBUG
-  get_fd_set().on_create_fd(fd_.get());
+  get_fd_set().on_create_fd(fd_);
 #endif
 }
 #endif
 
-NativeFd &NativeFd::operator=(NativeFd &&from) {
-  CHECK(this != &from);
-  close();
-  fd_ = std::move(from.fd_);
+NativeFd::NativeFd(NativeFd &&other) noexcept : fd_(other.fd_) {
 #if TD_PORT_WINDOWS
-  is_socket_ = from.is_socket_;
+  is_socket_ = other.is_socket_;
 #endif
+  other.fd_ = empty_fd();
+}
+
+NativeFd &NativeFd::operator=(NativeFd &&other) noexcept {
+  CHECK(this != &other);
+  close();
+  fd_ = other.fd_;
+#if TD_PORT_WINDOWS
+  is_socket_ = other.is_socket_;
+#endif
+  other.fd_ = empty_fd();
   return *this;
 }
 
@@ -146,8 +158,8 @@ NativeFd::~NativeFd() {
   close();
 }
 
-NativeFd::operator bool() const {
-  return fd_.get() != empty_fd();
+NativeFd::operator bool() const noexcept {
+  return fd_ != empty_fd();
 }
 
 NativeFd::Fd NativeFd::empty_fd() {
@@ -159,7 +171,7 @@ NativeFd::Fd NativeFd::empty_fd() {
 }
 
 NativeFd::Fd NativeFd::fd() const {
-  return fd_.get();
+  return fd_;
 }
 
 NativeFd::Socket NativeFd::socket() const {
@@ -167,7 +179,7 @@ NativeFd::Socket NativeFd::socket() const {
   return fd();
 #elif TD_PORT_WINDOWS
   CHECK(is_socket_);
-  return reinterpret_cast<Socket>(fd_.get());
+  return reinterpret_cast<Socket>(fd_);
 #endif
 }
 
@@ -213,6 +225,45 @@ Status NativeFd::duplicate(const NativeFd &to) const {
 #endif
 }
 
+static Result<uint32> maximize_buffer(const NativeFd::Socket &socket, int optname, uint32 max_size) {
+  if (setsockopt(socket, SOL_SOCKET, optname, reinterpret_cast<const char *>(&max_size), sizeof(max_size)) == 0) {
+    // fast path
+    return max_size;
+  }
+
+  /* Start with the default size. */
+  uint32 old_size = 0;
+  socklen_t intsize = sizeof(old_size);
+  if (getsockopt(socket, SOL_SOCKET, optname, reinterpret_cast<char *>(&old_size), &intsize)) {
+    return OS_SOCKET_ERROR("getsockopt() failed");
+  }
+#if TD_LINUX
+  old_size /= 2;
+#endif
+
+  /* Binary-search for the real maximum. */
+  uint32 last_good_size = old_size;
+  uint32 min_size = old_size;
+  while (min_size <= max_size) {
+    uint32 avg_size = min_size + (max_size - min_size) / 2;
+    if (setsockopt(socket, SOL_SOCKET, optname, reinterpret_cast<const char *>(&avg_size), sizeof(avg_size)) == 0) {
+      last_good_size = avg_size;
+      min_size = avg_size + 1;
+    } else {
+      max_size = avg_size - 1;
+    }
+  }
+  return last_good_size;
+}
+
+Result<uint32> NativeFd::maximize_snd_buffer(uint32 max_size) const {
+  return maximize_buffer(socket(), SO_SNDBUF, max_size == 0 ? DEFAULT_MAX_SND_BUFFER_SIZE : max_size);
+}
+
+Result<uint32> NativeFd::maximize_rcv_buffer(uint32 max_size) const {
+  return maximize_buffer(socket(), SO_RCVBUF, max_size == 0 ? DEFAULT_MAX_RCV_BUFFER_SIZE : max_size);
+}
+
 void NativeFd::close() {
   if (!*this) {
     return;
@@ -231,13 +282,13 @@ void NativeFd::close() {
     auto error = OS_ERROR("Close fd");
     LOG(ERROR) << error;
   }
-  fd_ = {};
+  fd_ = empty_fd();
 }
 
 NativeFd::Fd NativeFd::release() {
   VLOG(fd) << *this << " release";
-  auto res = fd_.get();
-  fd_ = {};
+  auto res = fd_;
+  fd_ = empty_fd();
 #if TD_FD_DEBUG
   get_fd_set().on_close_fd(res);
 #endif

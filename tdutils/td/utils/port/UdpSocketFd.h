@@ -1,5 +1,5 @@
 //
-// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2019
+// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2026
 //
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
@@ -13,6 +13,7 @@
 #include "td/utils/port/detail/NativeFd.h"
 #include "td/utils/port/detail/PollableFd.h"
 #include "td/utils/port/IPAddress.h"
+#include "td/utils/port/platform.h"
 #include "td/utils/Slice.h"
 #include "td/utils/Span.h"
 #include "td/utils/Status.h"
@@ -20,7 +21,6 @@
 #include <memory>
 
 namespace td {
-// Udp and errors
 namespace detail {
 class UdpSocketFdImpl;
 class UdpSocketFdImplDeleter {
@@ -38,15 +38,15 @@ struct UdpMessage {
 class UdpSocketFd {
  public:
   UdpSocketFd();
-  UdpSocketFd(UdpSocketFd &&);
-  UdpSocketFd &operator=(UdpSocketFd &&);
+  UdpSocketFd(UdpSocketFd &&) noexcept;
+  UdpSocketFd &operator=(UdpSocketFd &&) noexcept;
   ~UdpSocketFd();
 
   UdpSocketFd(const UdpSocketFd &) = delete;
   UdpSocketFd &operator=(const UdpSocketFd &) = delete;
 
-  Result<uint32> maximize_snd_buffer(uint32 max_buffer_size = 0);
-  Result<uint32> maximize_rcv_buffer(uint32 max_buffer_size = 0);
+  Result<uint32> maximize_snd_buffer(uint32 max_size = 0);
+  Result<uint32> maximize_rcv_buffer(uint32 max_size = 0);
 
   static Result<UdpSocketFd> open(const IPAddress &address) TD_WARN_UNUSED_RESULT;
 
@@ -84,8 +84,6 @@ class UdpSocketFd {
 #endif
 
  private:
-  static constexpr uint32 default_udp_max_snd_buffer_size = (1 << 24);
-  static constexpr uint32 default_udp_max_rcv_buffer_size = (1 << 24);
   std::unique_ptr<detail::UdpSocketFdImpl, detail::UdpSocketFdImplDeleter> impl_;
   explicit UdpSocketFd(unique_ptr<detail::UdpSocketFdImpl> impl);
 };

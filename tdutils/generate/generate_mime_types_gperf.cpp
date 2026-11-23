@@ -1,5 +1,5 @@
 //
-// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2019
+// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2026
 //
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
@@ -116,22 +116,22 @@ int main(int argc, char *argv[]) {
 
     std::vector<std::string> extensions;
     while (!extensions_string.empty()) {
-      extensions.push_back("");
+      extensions.emplace_back();
       std::tie(extensions.back(), extensions_string) = split(extensions_string);
     }
     assert(!extensions.empty());
 
-    std::map<std::string, std::string> preffered_extensions{{"image/jpeg", "jpg"},  {"audio/mpeg", "mp3"},
+    std::map<std::string, std::string> preferred_extensions{{"image/jpeg", "jpg"},  {"audio/mpeg", "mp3"},
                                                             {"audio/midi", "midi"}, {"text/x-pascal", "pas"},
                                                             {"text/x-asm", "asm"},  {"video/quicktime", "mov"}};
     std::size_t index = 0;
-    if (preffered_extensions.count(mime_type) != 0) {
-      index = std::find(extensions.begin(), extensions.end(), preffered_extensions[mime_type]) - extensions.begin();
+    if (preferred_extensions.count(mime_type) != 0) {
+      index = std::find(extensions.begin(), extensions.end(), preferred_extensions[mime_type]) - extensions.begin();
       assert(index < extensions.size());
     }
     if (mime_type_to_extension.emplace_hint(mime_type_to_extension.end(), mime_type, extensions[index])->second !=
         extensions[index]) {
-      std::cerr << "MIME type \"" << mime_type << "\" has more than one extensions list" << std::endl;
+      std::cerr << "MIME type \"" << mime_type << "\" has more than one list of extensions" << std::endl;
     }
 
     for (auto &extension : extensions) {

@@ -1,5 +1,5 @@
 //
-// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2019
+// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2026
 //
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
@@ -12,6 +12,7 @@ char disable_linker_warning_about_empty_file_bignum_cpp TD_UNUSED;
 
 #include "td/utils/logging.h"
 #include "td/utils/misc.h"
+#include "td/utils/SliceBuilder.h"
 
 #include <openssl/bn.h>
 #include <openssl/crypto.h>
@@ -27,10 +28,10 @@ class BigNumContext::Impl {
   Impl() : big_num_context(BN_CTX_new()) {
     LOG_IF(FATAL, big_num_context == nullptr);
   }
-  Impl(const Impl &other) = delete;
-  Impl &operator=(const Impl &other) = delete;
-  Impl(Impl &&other) = delete;
-  Impl &operator=(Impl &&other) = delete;
+  Impl(const Impl &) = delete;
+  Impl &operator=(const Impl &) = delete;
+  Impl(Impl &&) = delete;
+  Impl &operator=(Impl &&) = delete;
   ~Impl() {
     BN_CTX_free(big_num_context);
   }
@@ -39,9 +40,8 @@ class BigNumContext::Impl {
 BigNumContext::BigNumContext() : impl_(make_unique<Impl>()) {
 }
 
-BigNumContext::BigNumContext(BigNumContext &&other) = default;
-BigNumContext &BigNumContext::operator=(BigNumContext &&other) = default;
-
+BigNumContext::BigNumContext(BigNumContext &&) noexcept = default;
+BigNumContext &BigNumContext::operator=(BigNumContext &&) noexcept = default;
 BigNumContext::~BigNumContext() = default;
 
 class BigNum::Impl {
@@ -53,10 +53,10 @@ class BigNum::Impl {
   explicit Impl(BIGNUM *big_num) : big_num(big_num) {
     LOG_IF(FATAL, big_num == nullptr);
   }
-  Impl(const Impl &other) = delete;
-  Impl &operator=(const Impl &other) = delete;
-  Impl(Impl &&other) = delete;
-  Impl &operator=(Impl &&other) = delete;
+  Impl(const Impl &) = delete;
+  Impl &operator=(const Impl &) = delete;
+  Impl(Impl &&) = delete;
+  Impl &operator=(Impl &&) = delete;
   ~Impl() {
     BN_clear_free(big_num);
   }
@@ -70,6 +70,9 @@ BigNum::BigNum(const BigNum &other) : BigNum() {
 }
 
 BigNum &BigNum::operator=(const BigNum &other) {
+  if (this == &other) {
+    return *this;
+  }
   CHECK(impl_ != nullptr);
   CHECK(other.impl_ != nullptr);
   BIGNUM *result = BN_copy(impl_->big_num, other.impl_->big_num);
@@ -77,10 +80,8 @@ BigNum &BigNum::operator=(const BigNum &other) {
   return *this;
 }
 
-BigNum::BigNum(BigNum &&other) = default;
-
-BigNum &BigNum::operator=(BigNum &&other) = default;
-
+BigNum::BigNum(BigNum &&) noexcept = default;
+BigNum &BigNum::operator=(BigNum &&) noexcept = default;
 BigNum::~BigNum() = default;
 
 BigNum BigNum::from_binary(Slice str) {
@@ -88,7 +89,9 @@ BigNum BigNum::from_binary(Slice str) {
 }
 
 BigNum BigNum::from_le_binary(Slice str) {
-#if OPENSSL_VERSION_NUMBER >= 0x10100000L && !defined(LIBRESSL_VERSION_NUMBER)
+#if defined(OPENSSL_IS_BORINGSSL)
+  return BigNum(make_unique<Impl>(BN_le2bn(str.ubegin(), narrow_cast<int>(str.size()), nullptr)));
+#elif OPENSSL_VERSION_NUMBER >= 0x10100000L && !defined(LIBRESSL_VERSION_NUMBER)
   return BigNum(make_unique<Impl>(BN_lebin2bn(str.ubegin(), narrow_cast<int>(str.size()), nullptr)));
 #else
   string str_copy = str.str();
@@ -122,10 +125,6 @@ BigNum BigNum::from_raw(void *openssl_big_num) {
 BigNum::BigNum(unique_ptr<Impl> &&impl) : impl_(std::move(impl)) {
 }
 
-void BigNum::ensure_const_time() {
-  BN_set_flags(impl_->big_num, BN_FLG_CONSTTIME);
-}
-
 int BigNum::get_num_bits() const {
   return BN_num_bits(impl_->big_num);
 }
@@ -149,7 +148,12 @@ bool BigNum::is_bit_set(int num) const {
 }
 
 bool BigNum::is_prime(BigNumContext &context) const {
-  int result = BN_is_prime_ex(impl_->big_num, BN_prime_checks, context.impl_->big_num_context, nullptr);
+#if OPENSSL_VERSION_NUMBER >= 0x30000000L && !defined(LIBRESSL_VERSION_NUMBER)
+  int result = BN_check_prime(impl_->big_num, context.impl_->big_num_context, nullptr);
+#else
+  int result =
+      BN_is_prime_ex(impl_->big_num, get_num_bits() > 2048 ? 128 : 64, context.impl_->big_num_context, nullptr);
+#endif
   LOG_IF(FATAL, result == -1);
   return result == 1;
 }
@@ -208,16 +212,20 @@ string BigNum::to_binary(int exact_size) const {
 }
 
 string BigNum::to_le_binary(int exact_size) const {
-#if OPENSSL_VERSION_NUMBER >= 0x10100000L && !defined(LIBRESSL_VERSION_NUMBER)
+#if OPENSSL_VERSION_NUMBER >= 0x10100000L && !defined(LIBRESSL_VERSION_NUMBER) || defined(OPENSSL_IS_BORINGSSL)
   int num_size = get_num_bytes();
   if (exact_size == -1) {
     exact_size = num_size;
   } else {
     CHECK(exact_size >= num_size);
   }
-  string res(exact_size, '\0');
-  BN_bn2lebinpad(impl_->big_num, MutableSlice(res).ubegin(), exact_size);
-  return res;
+  string result(exact_size, '\0');
+#if defined(OPENSSL_IS_BORINGSSL)
+  BN_bn2le_padded(MutableSlice(result).ubegin(), exact_size, impl_->big_num);
+#else
+  BN_bn2lebinpad(impl_->big_num, MutableSlice(result).ubegin(), exact_size);
+#endif
+  return result;
 #else
   string result = to_binary(exact_size);
   std::reverse(result.begin(), result.end());
@@ -273,21 +281,29 @@ void BigNum::mod_mul(BigNum &r, BigNum &a, BigNum &b, const BigNum &m, BigNumCon
   LOG_IF(FATAL, result != 1);
 }
 
-void BigNum::mod_inverse(BigNum &r, BigNum &a, const BigNum &m, BigNumContext &context) {
-  auto result = BN_mod_inverse(r.impl_->big_num, a.impl_->big_num, m.impl_->big_num, context.impl_->big_num_context);
-  LOG_IF(FATAL, result != r.impl_->big_num);
+Result<BigNum> BigNum::mod_inverse(BigNum &a, const BigNum &m, BigNumContext &context) {
+  BigNum r;
+  auto *result = BN_mod_inverse(r.impl_->big_num, a.impl_->big_num, m.impl_->big_num, context.impl_->big_num_context);
+  if (result != r.impl_->big_num) {
+    CHECK(result == nullptr);
+    return Status::Error("Failed to compute modulo inverse");
+  }
+  return std::move(r);
 }
 
-void BigNum::div(BigNum *quotient, BigNum *remainder, const BigNum &dividend, const BigNum &divisor,
-                 BigNumContext &context) {
+Status BigNum::div(BigNum *quotient, BigNum *remainder, const BigNum &dividend, const BigNum &divisor,
+                   BigNumContext &context) {
   auto q = quotient == nullptr ? nullptr : quotient->impl_->big_num;
   auto r = remainder == nullptr ? nullptr : remainder->impl_->big_num;
   if (q == nullptr && r == nullptr) {
-    return;
+    return Status::OK();
   }
 
   auto result = BN_div(q, r, dividend.impl_->big_num, divisor.impl_->big_num, context.impl_->big_num_context);
-  LOG_IF(FATAL, result != 1);
+  if (result != 1) {
+    return Status::Error("Failed to compute quotient");
+  }
+  return Status::OK();
 }
 
 void BigNum::mod_exp(BigNum &r, const BigNum &a, const BigNum &p, const BigNum &m, BigNumContext &context) {

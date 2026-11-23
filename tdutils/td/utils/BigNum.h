@@ -1,5 +1,5 @@
 //
-// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2019
+// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2026
 //
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
@@ -19,10 +19,10 @@ namespace td {
 class BigNumContext {
  public:
   BigNumContext();
-  BigNumContext(const BigNumContext &other) = delete;
-  BigNumContext &operator=(const BigNumContext &other) = delete;
-  BigNumContext(BigNumContext &&other);
-  BigNumContext &operator=(BigNumContext &&other);
+  BigNumContext(const BigNumContext &) = delete;
+  BigNumContext &operator=(const BigNumContext &) = delete;
+  BigNumContext(BigNumContext &&other) noexcept;
+  BigNumContext &operator=(BigNumContext &&other) noexcept;
   ~BigNumContext();
 
  private:
@@ -37,8 +37,8 @@ class BigNum {
   BigNum();
   BigNum(const BigNum &other);
   BigNum &operator=(const BigNum &other);
-  BigNum(BigNum &&other);
-  BigNum &operator=(BigNum &&other);
+  BigNum(BigNum &&other) noexcept;
+  BigNum &operator=(BigNum &&other) noexcept;
   ~BigNum();
 
   static BigNum from_binary(Slice str);
@@ -52,8 +52,6 @@ class BigNum {
   static BigNum from_raw(void *openssl_big_num);
 
   void set_value(uint32 new_value);
-
-  void ensure_const_time();
 
   int get_num_bits() const;
 
@@ -99,10 +97,10 @@ class BigNum {
 
   static void mod_mul(BigNum &r, BigNum &a, BigNum &b, const BigNum &m, BigNumContext &context);
 
-  static void mod_inverse(BigNum &r, BigNum &a, const BigNum &m, BigNumContext &context);
+  static Result<BigNum> mod_inverse(BigNum &a, const BigNum &m, BigNumContext &context);
 
-  static void div(BigNum *quotient, BigNum *remainder, const BigNum &dividend, const BigNum &divisor,
-                  BigNumContext &context);
+  static Status div(BigNum *quotient, BigNum *remainder, const BigNum &dividend, const BigNum &divisor,
+                    BigNumContext &context) TD_WARN_UNUSED_RESULT;
 
   static void mod_exp(BigNum &r, const BigNum &a, const BigNum &p, const BigNum &m, BigNumContext &context);
 

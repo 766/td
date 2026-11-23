@@ -1,5 +1,5 @@
 //
-// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2019
+// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2026
 //
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
@@ -9,14 +9,15 @@ package org.drinkless.tdlib.example;
 import org.drinkless.tdlib.Client;
 import org.drinkless.tdlib.TdApi;
 
+import java.io.BufferedReader;
 import java.io.IOError;
 import java.io.IOException;
-import java.io.BufferedReader;
 import java.io.InputStreamReader;
 import java.util.NavigableSet;
 import java.util.TreeSet;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
@@ -29,37 +30,30 @@ public final class Example {
 
     private static TdApi.AuthorizationState authorizationState = null;
     private static volatile boolean haveAuthorization = false;
-    private static volatile boolean quiting = false;
+    private static volatile boolean needQuit = false;
+    private static volatile boolean canQuit = false;
 
     private static final Client.ResultHandler defaultHandler = new DefaultHandler();
 
     private static final Lock authorizationLock = new ReentrantLock();
     private static final Condition gotAuthorization = authorizationLock.newCondition();
 
-    private static final ConcurrentMap<Integer, TdApi.User> users = new ConcurrentHashMap<Integer, TdApi.User>();
-    private static final ConcurrentMap<Integer, TdApi.BasicGroup> basicGroups = new ConcurrentHashMap<Integer, TdApi.BasicGroup>();
-    private static final ConcurrentMap<Integer, TdApi.Supergroup> supergroups = new ConcurrentHashMap<Integer, TdApi.Supergroup>();
+    private static final ConcurrentMap<Long, TdApi.User> users = new ConcurrentHashMap<Long, TdApi.User>();
+    private static final ConcurrentMap<Long, TdApi.BasicGroup> basicGroups = new ConcurrentHashMap<Long, TdApi.BasicGroup>();
+    private static final ConcurrentMap<Long, TdApi.Supergroup> supergroups = new ConcurrentHashMap<Long, TdApi.Supergroup>();
     private static final ConcurrentMap<Integer, TdApi.SecretChat> secretChats = new ConcurrentHashMap<Integer, TdApi.SecretChat>();
 
     private static final ConcurrentMap<Long, TdApi.Chat> chats = new ConcurrentHashMap<Long, TdApi.Chat>();
-    private static final NavigableSet<OrderedChat> chatList = new TreeSet<OrderedChat>();
-    private static boolean haveFullChatList = false;
+    private static final NavigableSet<OrderedChat> mainChatList = new TreeSet<OrderedChat>();
+    private static boolean haveFullMainChatList = false;
 
-    private static final ConcurrentMap<Integer, TdApi.UserFullInfo> usersFullInfo = new ConcurrentHashMap<Integer, TdApi.UserFullInfo>();
-    private static final ConcurrentMap<Integer, TdApi.BasicGroupFullInfo> basicGroupsFullInfo = new ConcurrentHashMap<Integer, TdApi.BasicGroupFullInfo>();
-    private static final ConcurrentMap<Integer, TdApi.SupergroupFullInfo> supergroupsFullInfo = new ConcurrentHashMap<Integer, TdApi.SupergroupFullInfo>();
+    private static final ConcurrentMap<Long, TdApi.UserFullInfo> usersFullInfo = new ConcurrentHashMap<Long, TdApi.UserFullInfo>();
+    private static final ConcurrentMap<Long, TdApi.BasicGroupFullInfo> basicGroupsFullInfo = new ConcurrentHashMap<Long, TdApi.BasicGroupFullInfo>();
+    private static final ConcurrentMap<Long, TdApi.SupergroupFullInfo> supergroupsFullInfo = new ConcurrentHashMap<Long, TdApi.SupergroupFullInfo>();
 
     private static final String newLine = System.getProperty("line.separator");
     private static final String commandsLine = "Enter command (gcs - GetChats, gc <chatId> - GetChat, me - GetMe, sm <chatId> <message> - SendMessage, lo - LogOut, q - Quit): ";
     private static volatile String currentPrompt = null;
-
-    static {
-        try {
-            System.loadLibrary("tdjni");
-        } catch (UnsatisfiedLinkError e) {
-            e.printStackTrace();
-        }
-    }
 
     private static void print(String str) {
         if (currentPrompt != null) {
@@ -71,18 +65,24 @@ public final class Example {
         }
     }
 
-    private static void setChatOrder(TdApi.Chat chat, long order) {
-        synchronized (chatList) {
-            if (chat.order != 0) {
-                boolean isRemoved = chatList.remove(new OrderedChat(chat.order, chat.id));
-                assert isRemoved;
-            }
+    private static void setChatPositions(TdApi.Chat chat, TdApi.ChatPosition[] positions) {
+        synchronized (mainChatList) {
+            synchronized (chat) {
+                for (TdApi.ChatPosition position : chat.positions) {
+                    if (position.list.getConstructor() == TdApi.ChatListMain.CONSTRUCTOR) {
+                        boolean isRemoved = mainChatList.remove(new OrderedChat(chat.id, position));
+                        assert isRemoved;
+                    }
+                }
 
-            chat.order = order;
+                chat.positions = positions;
 
-            if (chat.order != 0) {
-                boolean isAdded = chatList.add(new OrderedChat(chat.order, chat.id));
-                assert isAdded;
+                for (TdApi.ChatPosition position : chat.positions) {
+                    if (position.list.getConstructor() == TdApi.ChatListMain.CONSTRUCTOR) {
+                        boolean isAdded = mainChatList.add(new OrderedChat(chat.id, position));
+                        assert isAdded;
+                    }
+                }
             }
         }
     }
@@ -93,26 +93,36 @@ public final class Example {
         }
         switch (Example.authorizationState.getConstructor()) {
             case TdApi.AuthorizationStateWaitTdlibParameters.CONSTRUCTOR:
-                TdApi.TdlibParameters parameters = new TdApi.TdlibParameters();
-                parameters.databaseDirectory = "tdlib";
-                parameters.useMessageDatabase = true;
-                parameters.useSecretChats = true;
-                parameters.apiId = 94575;
-                parameters.apiHash = "a3406de8d171bb422bb6ddf3bbd800e2";
-                parameters.systemLanguageCode = "en";
-                parameters.deviceModel = "Desktop";
-                parameters.systemVersion = "Unknown";
-                parameters.applicationVersion = "1.0";
-                parameters.enableStorageOptimizer = true;
+                TdApi.SetTdlibParameters request = new TdApi.SetTdlibParameters();
+                request.databaseDirectory = "tdlib";
+                request.useMessageDatabase = true;
+                request.useSecretChats = true;
+                request.apiId = 94575;
+                request.apiHash = "a3406de8d171bb422bb6ddf3bbd800e2";
+                request.systemLanguageCode = "en";
+                request.deviceModel = "Desktop";
+                request.applicationVersion = "1.0";
 
-                client.send(new TdApi.SetTdlibParameters(parameters), new AuthorizationRequestHandler());
-                break;
-            case TdApi.AuthorizationStateWaitEncryptionKey.CONSTRUCTOR:
-                client.send(new TdApi.CheckDatabaseEncryptionKey(), new AuthorizationRequestHandler());
+                client.send(request, new AuthorizationRequestHandler());
                 break;
             case TdApi.AuthorizationStateWaitPhoneNumber.CONSTRUCTOR: {
                 String phoneNumber = promptString("Please enter phone number: ");
                 client.send(new TdApi.SetAuthenticationPhoneNumber(phoneNumber, null), new AuthorizationRequestHandler());
+                break;
+            }
+            case TdApi.AuthorizationStateWaitOtherDeviceConfirmation.CONSTRUCTOR: {
+                String link = ((TdApi.AuthorizationStateWaitOtherDeviceConfirmation) Example.authorizationState).link;
+                System.out.println("Please confirm this login link on another device: " + link);
+                break;
+            }
+            case TdApi.AuthorizationStateWaitEmailAddress.CONSTRUCTOR: {
+                String emailAddress = promptString("Please enter email address: ");
+                client.send(new TdApi.SetAuthenticationEmailAddress(emailAddress), new AuthorizationRequestHandler());
+                break;
+            }
+            case TdApi.AuthorizationStateWaitEmailCode.CONSTRUCTOR: {
+                String code = promptString("Please enter email authentication code: ");
+                client.send(new TdApi.CheckAuthenticationEmailCode(new TdApi.EmailAddressAuthenticationCode(code)), new AuthorizationRequestHandler());
                 break;
             }
             case TdApi.AuthorizationStateWaitCode.CONSTRUCTOR: {
@@ -123,7 +133,7 @@ public final class Example {
             case TdApi.AuthorizationStateWaitRegistration.CONSTRUCTOR: {
                 String firstName = promptString("Please enter your first name: ");
                 String lastName = promptString("Please enter your last name: ");
-                client.send(new TdApi.RegisterUser(firstName, lastName), new AuthorizationRequestHandler());
+                client.send(new TdApi.RegisterUser(firstName, lastName, false), new AuthorizationRequestHandler());
                 break;
             }
             case TdApi.AuthorizationStateWaitPassword.CONSTRUCTOR: {
@@ -150,8 +160,10 @@ public final class Example {
                 break;
             case TdApi.AuthorizationStateClosed.CONSTRUCTOR:
                 print("Closed");
-                if (!quiting) {
-                    client = Client.create(new UpdatesHandler(), null, null); // recreate client after previous has closed
+                if (!needQuit) {
+                    client = Client.create(new UpdateHandler(), null, null); // recreate client after previous has closed
+                } else {
+                    canQuit = true;
                 }
                 break;
             default:
@@ -201,7 +213,7 @@ public final class Example {
                     if (commands.length > 1) {
                         limit = toInt(commands[1]);
                     }
-                    getChatList(limit);
+                    getMainChatList(limit);
                     break;
                 }
                 case "gc":
@@ -220,7 +232,7 @@ public final class Example {
                     client.send(new TdApi.LogOut(), defaultHandler);
                     break;
                 case "q":
-                    quiting = true;
+                    needQuit = true;
                     haveAuthorization = false;
                     client.send(new TdApi.Close(), defaultHandler);
                     break;
@@ -232,33 +244,26 @@ public final class Example {
         }
     }
 
-    private static void getChatList(final int limit) {
-        synchronized (chatList) {
-            if (!haveFullChatList && limit > chatList.size()) {
-                // have enough chats in the chat list or chat list is too small
-                long offsetOrder = Long.MAX_VALUE;
-                long offsetChatId = 0;
-                if (!chatList.isEmpty()) {
-                    OrderedChat last = chatList.last();
-                    offsetOrder = last.order;
-                    offsetChatId = last.chatId;
-                }
-                client.send(new TdApi.GetChats(offsetOrder, offsetChatId, limit - chatList.size()), new Client.ResultHandler() {
+    private static void getMainChatList(final int limit) {
+        synchronized (mainChatList) {
+            if (!haveFullMainChatList && limit > mainChatList.size()) {
+                // send LoadChats request if there are some unknown chats and have not enough known chats
+                client.send(new TdApi.LoadChats(new TdApi.ChatListMain(), limit - mainChatList.size()), new Client.ResultHandler() {
                     @Override
                     public void onResult(TdApi.Object object) {
                         switch (object.getConstructor()) {
                             case TdApi.Error.CONSTRUCTOR:
-                                System.err.println("Receive an error for GetChats:" + newLine + object);
-                                break;
-                            case TdApi.Chats.CONSTRUCTOR:
-                                long[] chatIds = ((TdApi.Chats) object).chatIds;
-                                if (chatIds.length == 0) {
-                                    synchronized (chatList) {
-                                        haveFullChatList = true;
+                                if (((TdApi.Error) object).code == 404) {
+                                    synchronized (mainChatList) {
+                                        haveFullMainChatList = true;
                                     }
+                                } else {
+                                    System.err.println("Receive an error for LoadChats:" + newLine + object);
                                 }
+                                break;
+                            case TdApi.Ok.CONSTRUCTOR:
                                 // chats had already been received through updates, let's retry request
-                                getChatList(limit);
+                                getMainChatList(limit);
                                 break;
                             default:
                                 System.err.println("Receive wrong response from TDLib:" + newLine + object);
@@ -268,11 +273,10 @@ public final class Example {
                 return;
             }
 
-            // have enough chats in the chat list to answer request
-            java.util.Iterator<OrderedChat> iter = chatList.iterator();
+            java.util.Iterator<OrderedChat> iter = mainChatList.iterator();
             System.out.println();
-            System.out.println("First " + limit + " chat(s) out of " + chatList.size() + " known chat(s):");
-            for (int i = 0; i < limit; i++) {
+            System.out.println("First " + limit + " chat(s) out of " + mainChatList.size() + " known chat(s):");
+            for (int i = 0; i < limit && i < mainChatList.size(); i++) {
                 long chatId = iter.next().chatId;
                 TdApi.Chat chat = chats.get(chatId);
                 synchronized (chat) {
@@ -285,28 +289,33 @@ public final class Example {
 
     private static void sendMessage(long chatId, String message) {
         // initialize reply markup just for testing
-        TdApi.InlineKeyboardButton[] row = {new TdApi.InlineKeyboardButton("https://telegram.org?1", new TdApi.InlineKeyboardButtonTypeUrl()), new TdApi.InlineKeyboardButton("https://telegram.org?2", new TdApi.InlineKeyboardButtonTypeUrl()), new TdApi.InlineKeyboardButton("https://telegram.org?3", new TdApi.InlineKeyboardButtonTypeUrl())};
-        TdApi.ReplyMarkup replyMarkup = new TdApi.ReplyMarkupInlineKeyboard(new TdApi.InlineKeyboardButton[][]{row, row, row});
+        TdApi.InlineKeyboardButton[] row = {
+            new TdApi.InlineKeyboardButton("https://telegram.org?1", 0, null, new TdApi.InlineKeyboardButtonTypeUrl()),
+            new TdApi.InlineKeyboardButton("https://telegram.org?2", 0, null, new TdApi.InlineKeyboardButtonTypeUrl()),
+            new TdApi.InlineKeyboardButton("https://telegram.org?3", 0, null, new TdApi.InlineKeyboardButtonTypeUrl())};
+        TdApi.ReplyMarkup replyMarkup = new TdApi.ReplyMarkupInlineKeyboard(new TdApi.InlineKeyboardButton[][]{row, row, row}, false);
 
-        TdApi.InputMessageContent content = new TdApi.InputMessageText(new TdApi.FormattedText(message, null), false, true);
-        client.send(new TdApi.SendMessage(chatId, 0, false, false, replyMarkup, content), defaultHandler);
+        TdApi.InputMessageContent content = new TdApi.InputMessageText(new TdApi.FormattedText(message, null), null, true);
+        client.send(new TdApi.SendMessage(chatId, null, null, null, replyMarkup, content), defaultHandler);
     }
 
     public static void main(String[] args) throws InterruptedException {
-        // disable TDLib log
-        Client.execute(new TdApi.SetLogVerbosityLevel(0));
-        if (Client.execute(new TdApi.SetLogStream(new TdApi.LogStreamFile("tdlib.log", 1 << 27))) instanceof TdApi.Error) {
+        // set log message handler to handle only fatal errors (0) and plain log messages (-1)
+        Client.setLogMessageHandler(0, new LogMessageHandler());
+
+        // disable TDLib log and redirect fatal errors and plain log messages to a file
+        try {
+            Client.execute(new TdApi.SetLogVerbosityLevel(0));
+            Client.execute(new TdApi.SetLogStream(new TdApi.LogStreamFile("tdlib.log", 1 << 27, false)));
+        } catch (Client.ExecutionException error) {
             throw new IOError(new IOException("Write access to the current directory is required"));
         }
 
         // create client
-        client = Client.create(new UpdatesHandler(), null, null);
-
-        // test Client.execute
-        defaultHandler.onResult(Client.execute(new TdApi.GetTextEntities("@telegram /test_command https://telegram.org telegram.me @gif @test")));
+        client = Client.create(new UpdateHandler(), null, null);
 
         // main loop
-        while (!quiting) {
+        while (!needQuit) {
             // await authorization
             authorizationLock.lock();
             try {
@@ -321,21 +330,24 @@ public final class Example {
                 getCommand();
             }
         }
+        while (!canQuit) {
+            Thread.sleep(1);
+        }
     }
 
     private static class OrderedChat implements Comparable<OrderedChat> {
-        final long order;
         final long chatId;
+        final TdApi.ChatPosition position;
 
-        OrderedChat(long order, long chatId) {
-            this.order = order;
+        OrderedChat(long chatId, TdApi.ChatPosition position) {
             this.chatId = chatId;
+            this.position = position;
         }
 
         @Override
         public int compareTo(OrderedChat o) {
-            if (this.order != o.order) {
-                return o.order < this.order ? -1 : 1;
+            if (this.position.order != o.position.order) {
+                return o.position.order < this.position.order ? -1 : 1;
             }
             if (this.chatId != o.chatId) {
                 return o.chatId < this.chatId ? -1 : 1;
@@ -346,7 +358,7 @@ public final class Example {
         @Override
         public boolean equals(Object obj) {
             OrderedChat o = (OrderedChat) obj;
-            return this.order == o.order && this.chatId == o.chatId;
+            return this.chatId == o.chatId && this.position.order == o.position.order;
         }
     }
 
@@ -357,7 +369,7 @@ public final class Example {
         }
     }
 
-    private static class UpdatesHandler implements Client.ResultHandler {
+    private static class UpdateHandler implements Client.ResultHandler {
         @Override
         public void onResult(TdApi.Object object) {
             switch (object.getConstructor()) {
@@ -369,7 +381,7 @@ public final class Example {
                     TdApi.UpdateUser updateUser = (TdApi.UpdateUser) object;
                     users.put(updateUser.user.id, updateUser.user);
                     break;
-                case TdApi.UpdateUserStatus.CONSTRUCTOR:  {
+                case TdApi.UpdateUserStatus.CONSTRUCTOR: {
                     TdApi.UpdateUserStatus updateUserStatus = (TdApi.UpdateUserStatus) object;
                     TdApi.User user = users.get(updateUserStatus.userId);
                     synchronized (user) {
@@ -396,9 +408,9 @@ public final class Example {
                     synchronized (chat) {
                         chats.put(chat.id, chat);
 
-                        long order = chat.order;
-                        chat.order = 0;
-                        setChatOrder(chat, order);
+                        TdApi.ChatPosition[] positions = chat.positions;
+                        chat.positions = new TdApi.ChatPosition[0];
+                        setChatPositions(chat, positions);
                     }
                     break;
                 }
@@ -418,29 +430,50 @@ public final class Example {
                     }
                     break;
                 }
+                case TdApi.UpdateChatPermissions.CONSTRUCTOR: {
+                    TdApi.UpdateChatPermissions update = (TdApi.UpdateChatPermissions) object;
+                    TdApi.Chat chat = chats.get(update.chatId);
+                    synchronized (chat) {
+                        chat.permissions = update.permissions;
+                    }
+                    break;
+                }
                 case TdApi.UpdateChatLastMessage.CONSTRUCTOR: {
                     TdApi.UpdateChatLastMessage updateChat = (TdApi.UpdateChatLastMessage) object;
                     TdApi.Chat chat = chats.get(updateChat.chatId);
                     synchronized (chat) {
                         chat.lastMessage = updateChat.lastMessage;
-                        setChatOrder(chat, updateChat.order);
+                        setChatPositions(chat, updateChat.positions);
                     }
                     break;
                 }
-                case TdApi.UpdateChatOrder.CONSTRUCTOR: {
-                    TdApi.UpdateChatOrder updateChat = (TdApi.UpdateChatOrder) object;
-                    TdApi.Chat chat = chats.get(updateChat.chatId);
-                    synchronized (chat) {
-                        setChatOrder(chat, updateChat.order);
+                case TdApi.UpdateChatPosition.CONSTRUCTOR: {
+                    TdApi.UpdateChatPosition updateChat = (TdApi.UpdateChatPosition) object;
+                    if (updateChat.position.list.getConstructor() != TdApi.ChatListMain.CONSTRUCTOR) {
+                        break;
                     }
-                    break;
-                }
-                case TdApi.UpdateChatIsPinned.CONSTRUCTOR: {
-                    TdApi.UpdateChatIsPinned updateChat = (TdApi.UpdateChatIsPinned) object;
+
                     TdApi.Chat chat = chats.get(updateChat.chatId);
                     synchronized (chat) {
-                        chat.isPinned = updateChat.isPinned;
-                        setChatOrder(chat, updateChat.order);
+                        int i;
+                        for (i = 0; i < chat.positions.length; i++) {
+                            if (chat.positions[i].list.getConstructor() == TdApi.ChatListMain.CONSTRUCTOR) {
+                                break;
+                            }
+                        }
+                        TdApi.ChatPosition[] new_positions = new TdApi.ChatPosition[chat.positions.length + (updateChat.position.order == 0 ? 0 : 1) - (i < chat.positions.length ? 1 : 0)];
+                        int pos = 0;
+                        if (updateChat.position.order != 0) {
+                            new_positions[pos++] = updateChat.position;
+                        }
+                        for (int j = 0; j < chat.positions.length; j++) {
+                            if (j != i) {
+                                new_positions[pos++] = chat.positions[j];
+                            }
+                        }
+                        assert pos == new_positions.length;
+
+                        setChatPositions(chat, new_positions);
                     }
                     break;
                 }
@@ -461,27 +494,19 @@ public final class Example {
                     }
                     break;
                 }
-                case TdApi.UpdateChatUnreadMentionCount.CONSTRUCTOR: {
-                    TdApi.UpdateChatUnreadMentionCount updateChat = (TdApi.UpdateChatUnreadMentionCount) object;
+                case TdApi.UpdateChatActionBar.CONSTRUCTOR: {
+                    TdApi.UpdateChatActionBar updateChat = (TdApi.UpdateChatActionBar) object;
                     TdApi.Chat chat = chats.get(updateChat.chatId);
                     synchronized (chat) {
-                        chat.unreadMentionCount = updateChat.unreadMentionCount;
+                        chat.actionBar = updateChat.actionBar;
                     }
                     break;
                 }
-                case TdApi.UpdateMessageMentionRead.CONSTRUCTOR: {
-                    TdApi.UpdateMessageMentionRead updateChat = (TdApi.UpdateMessageMentionRead) object;
+                case TdApi.UpdateChatAvailableReactions.CONSTRUCTOR: {
+                    TdApi.UpdateChatAvailableReactions updateChat = (TdApi.UpdateChatAvailableReactions) object;
                     TdApi.Chat chat = chats.get(updateChat.chatId);
                     synchronized (chat) {
-                        chat.unreadMentionCount = updateChat.unreadMentionCount;
-                    }
-                    break;
-                }
-                case TdApi.UpdateChatReplyMarkup.CONSTRUCTOR: {
-                    TdApi.UpdateChatReplyMarkup updateChat = (TdApi.UpdateChatReplyMarkup) object;
-                    TdApi.Chat chat = chats.get(updateChat.chatId);
-                    synchronized (chat) {
-                        chat.replyMarkupMessageId = updateChat.replyMarkupMessageId;
+                        chat.availableReactions = updateChat.availableReactions;
                     }
                     break;
                 }
@@ -490,7 +515,23 @@ public final class Example {
                     TdApi.Chat chat = chats.get(updateChat.chatId);
                     synchronized (chat) {
                         chat.draftMessage = updateChat.draftMessage;
-                        setChatOrder(chat, updateChat.order);
+                        setChatPositions(chat, updateChat.positions);
+                    }
+                    break;
+                }
+                case TdApi.UpdateChatMessageSender.CONSTRUCTOR: {
+                    TdApi.UpdateChatMessageSender updateChat = (TdApi.UpdateChatMessageSender) object;
+                    TdApi.Chat chat = chats.get(updateChat.chatId);
+                    synchronized (chat) {
+                        chat.messageSenderId = updateChat.messageSenderId;
+                    }
+                    break;
+                }
+                case TdApi.UpdateChatMessageAutoDeleteTime.CONSTRUCTOR: {
+                    TdApi.UpdateChatMessageAutoDeleteTime updateChat = (TdApi.UpdateChatMessageAutoDeleteTime) object;
+                    TdApi.Chat chat = chats.get(updateChat.chatId);
+                    synchronized (chat) {
+                        chat.messageAutoDeleteTime = updateChat.messageAutoDeleteTime;
                     }
                     break;
                 }
@@ -502,11 +543,91 @@ public final class Example {
                     }
                     break;
                 }
+                case TdApi.UpdateChatPendingJoinRequests.CONSTRUCTOR: {
+                    TdApi.UpdateChatPendingJoinRequests update = (TdApi.UpdateChatPendingJoinRequests) object;
+                    TdApi.Chat chat = chats.get(update.chatId);
+                    synchronized (chat) {
+                        chat.pendingJoinRequests = update.pendingJoinRequests;
+                    }
+                    break;
+                }
+                case TdApi.UpdateChatReplyMarkup.CONSTRUCTOR: {
+                    TdApi.UpdateChatReplyMarkup updateChat = (TdApi.UpdateChatReplyMarkup) object;
+                    TdApi.Chat chat = chats.get(updateChat.chatId);
+                    synchronized (chat) {
+                        chat.replyMarkupMessageId = updateChat.replyMarkupMessage != null ? updateChat.replyMarkupMessage.id : 0;
+                    }
+                    break;
+                }
+                case TdApi.UpdateChatBackground.CONSTRUCTOR: {
+                    TdApi.UpdateChatBackground updateChat = (TdApi.UpdateChatBackground) object;
+                    TdApi.Chat chat = chats.get(updateChat.chatId);
+                    synchronized (chat) {
+                        chat.background = updateChat.background;
+                    }
+                    break;
+                }
+                case TdApi.UpdateChatTheme.CONSTRUCTOR: {
+                    TdApi.UpdateChatTheme updateChat = (TdApi.UpdateChatTheme) object;
+                    TdApi.Chat chat = chats.get(updateChat.chatId);
+                    synchronized (chat) {
+                        chat.theme = updateChat.theme;
+                    }
+                    break;
+                }
+                case TdApi.UpdateChatUnreadMentionCount.CONSTRUCTOR: {
+                    TdApi.UpdateChatUnreadMentionCount updateChat = (TdApi.UpdateChatUnreadMentionCount) object;
+                    TdApi.Chat chat = chats.get(updateChat.chatId);
+                    synchronized (chat) {
+                        chat.unreadMentionCount = updateChat.unreadMentionCount;
+                    }
+                    break;
+                }
+                case TdApi.UpdateChatUnreadReactionCount.CONSTRUCTOR: {
+                    TdApi.UpdateChatUnreadReactionCount updateChat = (TdApi.UpdateChatUnreadReactionCount) object;
+                    TdApi.Chat chat = chats.get(updateChat.chatId);
+                    synchronized (chat) {
+                        chat.unreadReactionCount = updateChat.unreadReactionCount;
+                    }
+                    break;
+                }
+                case TdApi.UpdateChatUnreadPollVoteCount.CONSTRUCTOR: {
+                    TdApi.UpdateChatUnreadPollVoteCount updateChat = (TdApi.UpdateChatUnreadPollVoteCount) object;
+                    TdApi.Chat chat = chats.get(updateChat.chatId);
+                    synchronized (chat) {
+                        chat.unreadPollVoteCount = updateChat.unreadPollVoteCount;
+                    }
+                    break;
+                }
+                case TdApi.UpdateChatVideoChat.CONSTRUCTOR: {
+                    TdApi.UpdateChatVideoChat updateChat = (TdApi.UpdateChatVideoChat) object;
+                    TdApi.Chat chat = chats.get(updateChat.chatId);
+                    synchronized (chat) {
+                        chat.videoChat = updateChat.videoChat;
+                    }
+                    break;
+                }
                 case TdApi.UpdateChatDefaultDisableNotification.CONSTRUCTOR: {
                     TdApi.UpdateChatDefaultDisableNotification update = (TdApi.UpdateChatDefaultDisableNotification) object;
                     TdApi.Chat chat = chats.get(update.chatId);
                     synchronized (chat) {
                         chat.defaultDisableNotification = update.defaultDisableNotification;
+                    }
+                    break;
+                }
+                case TdApi.UpdateChatHasProtectedContent.CONSTRUCTOR: {
+                    TdApi.UpdateChatHasProtectedContent updateChat = (TdApi.UpdateChatHasProtectedContent) object;
+                    TdApi.Chat chat = chats.get(updateChat.chatId);
+                    synchronized (chat) {
+                        chat.hasProtectedContent = updateChat.hasProtectedContent;
+                    }
+                    break;
+                }
+                case TdApi.UpdateChatIsTranslatable.CONSTRUCTOR: {
+                    TdApi.UpdateChatIsTranslatable update = (TdApi.UpdateChatIsTranslatable) object;
+                    TdApi.Chat chat = chats.get(update.chatId);
+                    synchronized (chat) {
+                        chat.isTranslatable = update.isTranslatable;
                     }
                     break;
                 }
@@ -518,12 +639,36 @@ public final class Example {
                     }
                     break;
                 }
-                case TdApi.UpdateChatIsSponsored.CONSTRUCTOR: {
-                    TdApi.UpdateChatIsSponsored updateChat = (TdApi.UpdateChatIsSponsored) object;
+                case TdApi.UpdateChatBlockList.CONSTRUCTOR: {
+                    TdApi.UpdateChatBlockList update = (TdApi.UpdateChatBlockList) object;
+                    TdApi.Chat chat = chats.get(update.chatId);
+                    synchronized (chat) {
+                        chat.blockList = update.blockList;
+                    }
+                    break;
+                }
+                case TdApi.UpdateChatHasScheduledMessages.CONSTRUCTOR: {
+                    TdApi.UpdateChatHasScheduledMessages update = (TdApi.UpdateChatHasScheduledMessages) object;
+                    TdApi.Chat chat = chats.get(update.chatId);
+                    synchronized (chat) {
+                        chat.hasScheduledMessages = update.hasScheduledMessages;
+                    }
+                    break;
+                }
+
+                case TdApi.UpdateMessageMentionRead.CONSTRUCTOR: {
+                    TdApi.UpdateMessageMentionRead updateChat = (TdApi.UpdateMessageMentionRead) object;
                     TdApi.Chat chat = chats.get(updateChat.chatId);
                     synchronized (chat) {
-                        chat.isSponsored = updateChat.isSponsored;
-                        setChatOrder(chat, updateChat.order);
+                        chat.unreadMentionCount = updateChat.unreadMentionCount;
+                    }
+                    break;
+                }
+                case TdApi.UpdateMessageUnreadReactions.CONSTRUCTOR: {
+                    TdApi.UpdateMessageUnreadReactions updateChat = (TdApi.UpdateMessageUnreadReactions) object;
+                    TdApi.Chat chat = chats.get(updateChat.chatId);
+                    synchronized (chat) {
+                        chat.unreadReactionCount = updateChat.unreadReactionCount;
                     }
                     break;
                 }
@@ -559,6 +704,87 @@ public final class Example {
                     break;
                 default:
                     System.err.println("Receive wrong response from TDLib:" + newLine + object);
+            }
+        }
+    }
+
+    private static class LogMessageHandler implements Client.LogMessageHandler {
+        @Override
+        public void onLogMessage(int verbosityLevel, String message) {
+            if (verbosityLevel == 0) {
+                onFatalError(message);
+                return;
+            }
+            System.err.println(message);
+        }
+    }
+
+    private static void onFatalError(String errorMessage) {
+        final class ThrowError implements Runnable {
+            private final String errorMessage;
+            private final AtomicLong errorThrowTime;
+
+            private ThrowError(String errorMessage, AtomicLong errorThrowTime) {
+                this.errorMessage = errorMessage;
+                this.errorThrowTime = errorThrowTime;
+            }
+
+            @Override
+            public void run() {
+                if (isDatabaseBrokenError(errorMessage) || isDiskFullError(errorMessage) || isDiskError(errorMessage)) {
+                    processExternalError();
+                    return;
+                }
+
+                errorThrowTime.set(System.currentTimeMillis());
+                throw new ClientError("TDLib fatal error: " + errorMessage);
+            }
+
+            private void processExternalError() {
+                errorThrowTime.set(System.currentTimeMillis());
+                throw new ExternalClientError("Fatal error: " + errorMessage);
+            }
+
+            final class ClientError extends Error {
+                private ClientError(String message) {
+                    super(message);
+                }
+            }
+
+            final class ExternalClientError extends Error {
+                public ExternalClientError(String message) {
+                    super(message);
+                }
+            }
+
+            private boolean isDatabaseBrokenError(String message) {
+                return message.contains("Wrong key or database is corrupted") ||
+                        message.contains("SQL logic error or missing database") ||
+                        message.contains("database disk image is malformed") ||
+                        message.contains("file is encrypted or is not a database") ||
+                        message.contains("unsupported file format") ||
+                        message.contains("Database was corrupted and deleted during execution and can't be recreated");
+            }
+
+            private boolean isDiskFullError(String message) {
+                return message.contains("PosixError : No space left on device") ||
+                        message.contains("database or disk is full");
+            }
+
+            private boolean isDiskError(String message) {
+                return message.contains("I/O error") || message.contains("Structure needs cleaning");
+            }
+        }
+
+        final AtomicLong errorThrowTime = new AtomicLong(Long.MAX_VALUE);
+        new Thread(new ThrowError(errorMessage, errorThrowTime), "TDLib fatal error thread").start();
+
+        // wait at least 10 seconds after the error is thrown
+        while (errorThrowTime.get() >= System.currentTimeMillis() - 10000) {
+            try {
+                Thread.sleep(1000 /* milliseconds */);
+            } catch (InterruptedException ignore) {
+                Thread.currentThread().interrupt();
             }
         }
     }

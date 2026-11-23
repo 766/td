@@ -1,5 +1,5 @@
 //
-// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2019
+// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2026
 //
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
@@ -10,6 +10,7 @@
 #include "td/utils/logging.h"
 #include "td/utils/misc.h"
 #include "td/utils/Slice.h"
+#include "td/utils/SliceBuilder.h"
 
 namespace td {
 
@@ -40,7 +41,7 @@ Status Socks5::wait_greeting_response() {
   auto buffer_slice = buf.read_as_buffer_slice(2);
   auto slice = buffer_slice.as_slice();
   if (slice[0] != '\x05') {
-    return Status::Error(PSLICE() << "Unsupported socks protocol version " << int(slice[0]));
+    return Status::Error(PSLICE() << "Unsupported socks protocol version " << static_cast<int>(slice[0]));
   }
   auto authentication_method = slice[1];
   if (authentication_method == '\0') {
@@ -83,7 +84,8 @@ Status Socks5::wait_password_response() {
   auto buffer_slice = buf.read_as_buffer_slice(2);
   auto slice = buffer_slice.as_slice();
   if (slice[0] != '\x01') {
-    return Status::Error(PSLICE() << "Unsupported socks subnegotiation protocol version " << int(slice[0]));
+    return Status::Error(PSLICE() << "Unsupported socks subnegotiation protocol version "
+                                  << static_cast<int>(slice[0]));
   }
   if (slice[1] != '\x00') {
     return Status::Error("Wrong username or password");
@@ -102,14 +104,14 @@ void Socks5::send_ip_address() {
   request += '\x00';
   if (ip_address_.is_ipv4()) {
     request += '\x01';
-    auto ipv4 = ntohl(ip_address_.get_ipv4());
+    auto ipv4 = htonl(ip_address_.get_ipv4());
     request += static_cast<char>(ipv4 & 255);
     request += static_cast<char>((ipv4 >> 8) & 255);
     request += static_cast<char>((ipv4 >> 16) & 255);
     request += static_cast<char>((ipv4 >> 24) & 255);
   } else {
     request += '\x04';
-    request += ip_address_.get_ipv6().str();
+    request += ip_address_.get_ipv6();
   }
   auto port = ip_address_.get_port();
   request += static_cast<char>((port >> 8) & 255);

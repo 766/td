@@ -1,5 +1,5 @@
 //
-// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2019
+// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2026
 //
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
@@ -11,10 +11,11 @@
 // To close queue, one should send as much sentinel elements as there are readers.
 // Once there are no readers and writers, one may easily destroy queue
 
+#include "td/utils/common.h"
 #include "td/utils/format.h"
 #include "td/utils/HazardPointers.h"
 #include "td/utils/logging.h"
-#include "td/utils/port/thread.h"
+#include "td/utils/port/sleep.h"
 #include "td/utils/ScopeGuard.h"
 
 #include <array>
@@ -105,24 +106,28 @@ template <class T>
 class OneValue<T *> {
  public:
   bool set_value(T *value) {
-    T *was = nullptr;
+    T *was = Empty();
     return state_.compare_exchange_strong(was, value, std::memory_order_acq_rel);
   }
   bool get_value(T *&value) {
     value = state_.exchange(Taken(), std::memory_order_acq_rel);
-    return value != nullptr;
+    return value != Empty();
   }
   void reset() {
-    state_ = nullptr;
+    state_ = Empty();
   }
   OneValue() {
   }
 
  private:
-  std::atomic<T *> state_{nullptr};
-  T *Taken() {
-    static T xxx;
-    return &xxx;
+  std::atomic<T *> state_{Empty()};
+  static T *Empty() {
+    static int64 xxx;
+    return reinterpret_cast<T *>(&xxx);
+  }
+  static T *Taken() {
+    static int64 xxx;
+    return reinterpret_cast<T *>(&xxx);
   }
 };
 
@@ -149,7 +154,6 @@ class MpmcQueueBlock {
   }
 
   //nonblocking pop
-  //returns Ok, Empty or Closed
   PopStatus try_pop(T &value) {
     while (true) {
       // this check slows 1:1 case but prevents writer starvation in 1:N case
@@ -213,10 +217,10 @@ class MpmcQueueOld {
     node.release();
   }
 
-  MpmcQueueOld(const MpmcQueueOld &other) = delete;
-  MpmcQueueOld &operator=(const MpmcQueueOld &other) = delete;
-  MpmcQueueOld(MpmcQueueOld &&other) = delete;
-  MpmcQueueOld &operator=(MpmcQueueOld &&other) = delete;
+  MpmcQueueOld(const MpmcQueueOld &) = delete;
+  MpmcQueueOld &operator=(const MpmcQueueOld &) = delete;
+  MpmcQueueOld(MpmcQueueOld &&) = delete;
+  MpmcQueueOld &operator=(MpmcQueueOld &&) = delete;
   ~MpmcQueueOld() {
     auto *ptr = read_pos_.load(std::memory_order_relaxed);
     while (ptr) {
@@ -301,7 +305,7 @@ class MpmcQueueOld {
       if (try_pop(value, thread_id)) {
         return value;
       }
-      td::this_thread::yield();
+      usleep_for(1);
     }
   }
 
@@ -312,7 +316,7 @@ class MpmcQueueOld {
     std::atomic<Node *> next_{nullptr};
     char pad[TD_CONCURRENCY_PAD - sizeof(std::atomic<Node *>)];
     MpmcQueueBlock<T> block;
-    //Got pad in MpmcQueueBlock
+    // MpmcQueueBlock is already padded
   };
   std::atomic<Node *> write_pos_{nullptr};
   char pad[TD_CONCURRENCY_PAD - sizeof(std::atomic<Node *>)];
@@ -320,7 +324,7 @@ class MpmcQueueOld {
   char pad2[TD_CONCURRENCY_PAD - sizeof(std::atomic<Node *>)];
   size_t block_size_;
   HazardPointers<Node, 1> hazard_pointers_;
-  //Got pad in HazardPointers
+  // HazardPointers class is already padded
 };
 
 template <class T>
@@ -338,10 +342,10 @@ class MpmcQueue {
     node.release();
   }
 
-  MpmcQueue(const MpmcQueue &other) = delete;
-  MpmcQueue &operator=(const MpmcQueue &other) = delete;
-  MpmcQueue(MpmcQueue &&other) = delete;
-  MpmcQueue &operator=(MpmcQueue &&other) = delete;
+  MpmcQueue(const MpmcQueue &) = delete;
+  MpmcQueue &operator=(const MpmcQueue &) = delete;
+  MpmcQueue(MpmcQueue &&) = delete;
+  MpmcQueue &operator=(MpmcQueue &&) = delete;
   ~MpmcQueue() {
     auto *ptr = read_pos_.load(std::memory_order_relaxed);
     while (ptr) {
@@ -425,7 +429,7 @@ class MpmcQueue {
       if (try_pop(value, thread_id)) {
         return value;
       }
-      td::this_thread::yield();
+      usleep_for(1);
     }
   }
 
@@ -444,14 +448,13 @@ class MpmcQueue {
     Block block;
     std::atomic<Node *> next{nullptr};
     char pad[TD_CONCURRENCY_PAD - sizeof(std::atomic<Node *>)];
-    //Got pad in MpmcQueueBlock
   };
   std::atomic<Node *> write_pos_{nullptr};
   char pad[TD_CONCURRENCY_PAD - sizeof(std::atomic<Node *>)];
   std::atomic<Node *> read_pos_{nullptr};
   char pad2[TD_CONCURRENCY_PAD - sizeof(std::atomic<Node *>)];
   HazardPointers<Node, 1> hazard_pointers_;
-  //Got pad in HazardPointers
+  // HazardPointers class is already padded
 };
 
 }  // namespace td

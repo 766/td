@@ -1,5 +1,5 @@
 //
-// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2019
+// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2026
 //
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
@@ -12,7 +12,7 @@
 namespace td {
 
 // It is not about handling gaps.
-// It is about finding mem processed pts.
+// It is about finding mem processed PTS.
 // All checks must be done before.
 
 class PtsManager {
@@ -26,8 +26,7 @@ class PtsManager {
 
   // 0 if not a checkpoint
   PtsId add_pts(int32 pts) {
-    CHECK(pts >= 0);
-    if (pts != 0) {
+    if (pts > 0) {
       mem_pts_ = pts;
     }
     return state_helper_.add(pts);

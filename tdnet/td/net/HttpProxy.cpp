@@ -1,5 +1,5 @@
 //
-// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2019
+// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2026
 //
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
@@ -12,6 +12,7 @@
 #include "td/utils/logging.h"
 #include "td/utils/misc.h"
 #include "td/utils/Slice.h"
+#include "td/utils/SliceBuilder.h"
 
 namespace td {
 
@@ -20,11 +21,12 @@ void HttpProxy::send_connect() {
   CHECK(state_ == State::SendConnect);
   state_ = State::WaitConnectResponse;
 
-  string host = PSTRING() << ip_address_.get_ip_str() << ':' << ip_address_.get_port();
+  string host = PSTRING() << ip_address_.get_ip_host() << ':' << ip_address_.get_port();
   string proxy_authorization;
   if (!username_.empty() || !password_.empty()) {
     auto userinfo = PSTRING() << username_ << ':' << password_;
-    proxy_authorization = PSTRING() << "Proxy-Authorization: basic " << td::base64_encode(userinfo) << "\r\n";
+    proxy_authorization = PSTRING() << "Proxy-Authorization: Basic " << base64_encode(userinfo) << "\r\n";
+    VLOG(proxy) << "Use credentials to connect to proxy: " << proxy_authorization;
   }
   fd_.output_buffer().append(PSLICE() << "CONNECT " << host << " HTTP/1.1\r\n"
                                       << "Host: " << host << "\r\n"
@@ -46,8 +48,8 @@ Status HttpProxy::wait_connect_response() {
     char buf[1024];
     size_t len = min(sizeof(buf), it.size());
     it.advance(len, MutableSlice{buf, sizeof(buf)});
-    VLOG(proxy) << "Failed to connect: " << format::escaped(Slice(buf, len));
-    return Status::Error(PSLICE() << "Failed to connect to " << ip_address_.get_ip_str() << ':'
+    VLOG(proxy) << "Failed to connect: " << format::escaped(begin) << format::escaped(Slice(buf, len));
+    return Status::Error(PSLICE() << "Failed to connect to " << ip_address_.get_ip_host() << ':'
                                   << ip_address_.get_port());
   }
 

@@ -1,5 +1,5 @@
 //
-// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2019
+// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2026
 //
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
@@ -17,42 +17,18 @@
 #include "td/utils/Parser.h"
 #include "td/utils/PathView.h"
 #include "td/utils/port/path.h"
+#include "td/utils/SliceBuilder.h"
 
+#include <cstddef>
 #include <cstring>
 
 namespace td {
 
-constexpr const char HttpReader::TEMP_DIRECTORY_PREFIX[];
-
-static size_t urldecode(Slice from, MutableSlice to, bool decode_plus_sign_as_space) {
-  size_t to_i = 0;
-  CHECK(to.size() >= from.size());
-  for (size_t from_i = 0, n = from.size(); from_i < n; from_i++) {
-    if (from[from_i] == '%' && from_i + 2 < n) {
-      int high = hex_to_int(from[from_i + 1]);
-      int low = hex_to_int(from[from_i + 2]);
-      if (high < 16 && low < 16) {
-        to[to_i++] = static_cast<char>(high * 16 + low);
-        from_i += 2;
-        continue;
-      }
-    }
-    to[to_i++] = decode_plus_sign_as_space && from[from_i] == '+' ? ' ' : from[from_i];
-  }
-  return to_i;
-}
-
-static MutableSlice urldecode_inplace(MutableSlice str, bool decode_plus_sign_as_space) {
-  size_t result_size = urldecode(str, str, decode_plus_sign_as_space);
-  str.truncate(result_size);
-  return str;
-}
-
 void HttpReader::init(ChainBufferReader *input, size_t max_post_size, size_t max_files) {
   input_ = input;
-  state_ = ReadHeaders;
+  state_ = State::ReadHeaders;
   headers_read_length_ = 0;
-  content_length_ = 0;
+  content_length_ = -1;
   query_ = nullptr;
   max_post_size_ = max_post_size;
   max_files_ = max_files;
@@ -60,14 +36,25 @@ void HttpReader::init(ChainBufferReader *input, size_t max_post_size, size_t max
   total_headers_length_ = 0;
 }
 
-Result<size_t> HttpReader::read_next(HttpQuery *query) {
+Result<size_t> HttpReader::read_next(HttpQuery *query, bool can_be_slow) {
   if (query_ != query) {
     CHECK(query_ == nullptr);
     query_ = query;
   }
+
+  auto r_size = do_read_next(can_be_slow);
+  if (state_ != State::ReadHeaders && flow_sink_.is_ready() && r_size.is_ok() && r_size.ok() > 0) {
+    CHECK(flow_sink_.status().is_ok());
+    return Status::Error(400, "Bad Request: unexpected end of request content");
+  }
+  return r_size;
+}
+
+Result<size_t> HttpReader::do_read_next(bool can_be_slow) {
   size_t need_size = input_->size() + 1;
   while (true) {
-    if (state_ != ReadHeaders) {
+    if (state_ != State::ReadHeaders) {
+      gzip_flow_.wakeup();
       flow_source_.wakeup();
       if (flow_sink_.is_ready() && flow_sink_.status().is_error()) {
         if (!temp_file_.empty()) {
@@ -81,19 +68,19 @@ Result<size_t> HttpReader::read_next(HttpQuery *query) {
       }
     }
     switch (state_) {
-      case ReadHeaders: {
+      case State::ReadHeaders: {
         auto result = split_header();
         if (result.is_error() || result.ok() != 0) {
           return result;
         }
-        if (transfer_encoding_.empty() && content_length_ == 0) {
+        if (transfer_encoding_.empty() && content_length_ <= 0) {
           break;
         }
 
         flow_source_ = ByteFlowSource(input_);
         ByteFlowInterface *source = &flow_source_;
         if (transfer_encoding_.empty()) {
-          content_length_flow_ = HttpContentLengthByteFlow(content_length_);
+          content_length_flow_ = HttpContentLengthByteFlow(narrow_cast<size_t>(content_length_));
           *source >> content_length_flow_;
           source = &content_length_flow_;
         } else if (transfer_encoding_ == "chunked") {
@@ -105,10 +92,14 @@ Result<size_t> HttpReader::read_next(HttpQuery *query) {
           return Status::Error(501, "Unimplemented: unsupported transfer-encoding");
         }
 
-        if (content_encoding_.empty()) {
+        if (content_encoding_.empty() || content_encoding_ == "none") {
         } else if (content_encoding_ == "gzip" || content_encoding_ == "deflate") {
-          gzip_flow_ = GzipByteFlow(Gzip::Decode);
-          gzip_flow_.set_max_output_size(MAX_FILE_SIZE);
+          gzip_flow_ = GzipByteFlow(Gzip::Mode::Decode);
+          GzipByteFlow::Options options;
+          options.write_watermark.low = 0;
+          options.write_watermark.high = max(max_post_size_, MAX_TOTAL_PARAMETERS_LENGTH + 1);
+          gzip_flow_.set_options(options);
+          gzip_flow_.set_max_output_size(MAX_CONTENT_SIZE);
           *source >> gzip_flow_;
           source = &gzip_flow_;
         } else {
@@ -120,26 +111,26 @@ Result<size_t> HttpReader::read_next(HttpQuery *query) {
         *source >> flow_sink_;
         content_ = flow_sink_.get_output();
 
-        if (content_length_ > MAX_CONTENT_SIZE) {
+        if (content_length_ >= static_cast<int64>(MAX_CONTENT_SIZE)) {
           return Status::Error(413, PSLICE() << "Request Entity Too Large: content length is " << content_length_);
         }
 
         if (content_type_lowercased_.find("multipart/form-data") != string::npos) {
-          state_ = ReadMultipartFormData;
+          state_ = State::ReadMultipartFormData;
 
           const char *p = std::strstr(content_type_lowercased_.c_str(), "boundary");
           if (p == nullptr) {
             return Status::Error(400, "Bad Request: boundary not found");
           }
           p += 8;
-          ptrdiff_t offset = p - content_type_lowercased_.c_str();
+          std::ptrdiff_t offset = p - content_type_lowercased_.c_str();
           p = static_cast<const char *>(
               std::memchr(content_type_.begin() + offset, '=', content_type_.size() - offset));
           if (p == nullptr) {
             return Status::Error(400, "Bad Request: boundary value not found");
           }
           p++;
-          const char *end_p = static_cast<const char *>(std::memchr(p, ';', content_type_.end() - p));
+          auto end_p = static_cast<const char *>(std::memchr(p, ';', content_type_.end() - p));
           if (end_p == nullptr) {
             end_p = content_type_.end();
           }
@@ -148,72 +139,85 @@ Result<size_t> HttpReader::read_next(HttpQuery *query) {
             end_p--;
           }
 
+          CHECK(p != nullptr);
           Slice boundary(p, static_cast<size_t>(end_p - p));
           if (boundary.empty() || boundary.size() > MAX_BOUNDARY_LENGTH) {
             return Status::Error(400, "Bad Request: boundary too big or empty");
           }
 
           boundary_ = "\r\n--" + boundary.str();
-          form_data_parse_state_ = SkipPrologue;
+          form_data_parse_state_ = FormDataParseState::SkipPrologue;
           form_data_read_length_ = 0;
           form_data_skipped_length_ = 0;
         } else if (content_type_lowercased_.find("application/x-www-form-urlencoded") != string::npos ||
                    content_type_lowercased_.find("application/json") != string::npos) {
-          state_ = ReadArgs;
+          state_ = State::ReadArgs;
         } else {
           form_data_skipped_length_ = 0;
-          state_ = ReadContent;
+          state_ = State::ReadContent;
         }
         continue;
       }
-      case ReadContent: {
+      case State::ReadContent: {
         if (content_->size() > max_post_size_) {
-          state_ = ReadContentToFile;
+          state_ = State::ReadContentToFile;
+          GzipByteFlow::Options options;
+          options.write_watermark.low = 4 << 20;
+          options.write_watermark.high = 8 << 20;
+          gzip_flow_.set_options(options);
           continue;
         }
         if (flow_sink_.is_ready()) {
           CHECK(query_->container_.size() == 1u);
           query_->container_.emplace_back(content_->cut_head(content_->size()).move_as_buffer_slice());
-          query_->content_ = query_->container_.back().as_slice();
+          query_->content_ = query_->container_.back().as_mutable_slice();
           break;
         }
 
         return need_size;
       }
-      case ReadContentToFile: {
+      case State::ReadContentToFile: {
+        if (!can_be_slow) {
+          return Status::Error("SLOW");
+        }
         // save content to a file
         if (temp_file_.empty()) {
-          auto file = open_temp_file("file");
-          if (file.is_error()) {
+          auto open_status = open_temp_file("file");
+          if (open_status.is_error()) {
             return Status::Error(500, "Internal Server Error: can't create temporary file");
           }
         }
 
         auto size = content_->size();
-        if (size) {
+        bool restart = false;
+        if (size > (1 << 20) || flow_sink_.is_ready()) {
           TRY_STATUS(save_file_part(content_->cut_head(size).move_as_buffer_slice()));
+          restart = true;
         }
         if (flow_sink_.is_ready()) {
           query_->files_.emplace_back("file", "", content_type_.str(), file_size_, temp_file_name_);
           close_temp_file();
           break;
         }
+        if (restart) {
+          continue;
+        }
 
         return need_size;
       }
-      case ReadArgs: {
+      case State::ReadArgs: {
         auto size = content_->size();
         if (size > MAX_TOTAL_PARAMETERS_LENGTH - total_parameters_length_) {
-          return Status::Error(413, "Request Entity Too Large: too much parameters");
+          return Status::Error(413, "Request Entity Too Large: too many parameters");
         }
 
         if (flow_sink_.is_ready()) {
           query_->container_.emplace_back(content_->cut_head(size).move_as_buffer_slice());
           Status result;
           if (content_type_lowercased_.find("application/x-www-form-urlencoded") != string::npos) {
-            result = parse_parameters(query_->container_.back().as_slice());
+            result = parse_parameters(query_->container_.back().as_mutable_slice());
           } else {
-            result = parse_json_parameters(query_->container_.back().as_slice());
+            result = parse_json_parameters(query_->container_.back().as_mutable_slice());
           }
           if (result.is_error()) {
             if (result.code() == 413) {
@@ -227,10 +231,12 @@ Result<size_t> HttpReader::read_next(HttpQuery *query) {
 
         return need_size;
       }
-      case ReadMultipartFormData: {
-        TRY_RESULT(result, parse_multipart_form_data());
-        if (result) {
-          break;
+      case State::ReadMultipartFormData: {
+        if (!content_->empty() || flow_sink_.is_ready()) {
+          TRY_RESULT(result, parse_multipart_form_data(can_be_slow));
+          if (result) {
+            break;
+          }
         }
         return need_size;
       }
@@ -247,18 +253,19 @@ Result<size_t> HttpReader::read_next(HttpQuery *query) {
 // returns Status on wrong request
 // returns true if parsing has finished
 // returns false if need more data
-Result<bool> HttpReader::parse_multipart_form_data() {
+Result<bool> HttpReader::parse_multipart_form_data(bool can_be_slow) {
   while (true) {
-    LOG(DEBUG) << "Parsing multipart form data in state " << form_data_parse_state_;
+    LOG(DEBUG) << "Parsing multipart form data in state " << static_cast<int32>(form_data_parse_state_)
+               << " with already read length " << form_data_read_length_;
     switch (form_data_parse_state_) {
-      case SkipPrologue:
+      case FormDataParseState::SkipPrologue:
         if (find_boundary(content_->clone(), {boundary_.c_str() + 2, boundary_.size() - 2}, form_data_read_length_)) {
           size_t to_skip = form_data_read_length_ + (boundary_.size() - 2);
           content_->advance(to_skip);
           form_data_skipped_length_ += to_skip;
           form_data_read_length_ = 0;
 
-          form_data_parse_state_ = ReadPartHeaders;
+          form_data_parse_state_ = FormDataParseState::ReadPartHeaders;
           continue;
         }
 
@@ -266,14 +273,14 @@ Result<bool> HttpReader::parse_multipart_form_data() {
         form_data_skipped_length_ += form_data_read_length_;
         form_data_read_length_ = 0;
         return false;
-      case ReadPartHeaders:
+      case FormDataParseState::ReadPartHeaders:
         if (find_boundary(content_->clone(), "\r\n\r\n", form_data_read_length_)) {
           total_headers_length_ += form_data_read_length_;
           if (total_headers_length_ > MAX_TOTAL_HEADERS_LENGTH) {
             return Status::Error(431, "Request Header Fields Too Large: total headers size exceeded");
           }
           if (form_data_read_length_ == 0) {
-            // there is no headers at all
+            // there are no headers at all
             return Status::Error(400, "Bad Request: headers in multipart/form-data are empty");
           }
 
@@ -294,7 +301,7 @@ Result<bool> HttpReader::parse_multipart_form_data() {
           CHECK(temp_file_.empty());
           temp_file_name_.clear();
 
-          Parser headers_parser(headers.as_slice());
+          Parser headers_parser(headers.as_mutable_slice());
           while (headers_parser.status().is_ok() && !headers_parser.data().empty()) {
             MutableSlice header_name = headers_parser.read_till(':');
             headers_parser.skip(':');
@@ -321,30 +328,65 @@ Result<bool> HttpReader::parse_multipart_form_data() {
               header_value.remove_prefix(10);
               while (true) {
                 header_value = trim(header_value);
-                const char *key_end =
+                const auto *key_end =
                     static_cast<const char *>(std::memchr(header_value.data(), '=', header_value.size()));
                 if (key_end == nullptr) {
                   break;
                 }
                 size_t key_size = key_end - header_value.data();
-                auto key = header_value.substr(0, key_size);
-                key = trim(key);
+                auto key = trim(header_value.substr(0, key_size));
 
                 header_value.remove_prefix(key_size + 1);
-                const char *value_end =
-                    static_cast<const char *>(std::memchr(header_value.data(), ';', header_value.size()));
-                size_t value_size;
-                if (value_end == nullptr) {
-                  value_size = header_value.size();
-                } else {
-                  value_size = value_end - header_value.data();
+
+                while (!header_value.empty() && is_space(header_value[0])) {
+                  header_value.remove_prefix(1);
                 }
-                auto value = header_value.substr(0, value_size);
-                value = trim(value);
-                if (value.size() > 1u && value[0] == '"' && value.back() == '"') {
-                  value = {value.data() + 1, value.size() - 2};
+
+                MutableSlice value;
+                if (!header_value.empty() && header_value[0] == '"') {  // quoted-string
+                  char *value_end = header_value.data() + 1;
+                  const char *pos = value_end;
+                  while (true) {
+                    if (pos == header_value.data() + header_value.size()) {
+                      return Status::Error(400, "Bad Request: unclosed quoted string in Content-Disposition header");
+                    }
+                    char c = *pos++;
+                    if (c == '"') {
+                      break;
+                    }
+                    if (c == '\\') {
+                      if (pos == header_value.data() + header_value.size()) {
+                        return Status::Error(400, "Bad Request: wrong escape sequence in Content-Disposition header");
+                      }
+                      c = *pos++;
+                    }
+                    *value_end++ = c;
+                  }
+                  value = header_value.substr(1, value_end - header_value.data() - 1);
+                  header_value.remove_prefix(pos - header_value.data());
+
+                  while (!header_value.empty() && is_space(header_value[0])) {
+                    header_value.remove_prefix(1);
+                  }
+                  if (!header_value.empty()) {
+                    if (header_value[0] != ';') {
+                      return Status::Error(400, "Bad Request: expected ';' in Content-Disposition header");
+                    }
+                    header_value.remove_prefix(1);
+                  }
+                } else {  // token
+                  auto value_end =
+                      static_cast<const char *>(std::memchr(header_value.data(), ';', header_value.size()));
+                  if (value_end != nullptr) {
+                    auto value_size = static_cast<size_t>(value_end - header_value.data());
+                    value = trim(header_value.substr(0, value_size));
+                    header_value.remove_prefix(value_size + 1);
+                  } else {
+                    value = trim(header_value);
+                    header_value = MutableSlice();
+                  }
                 }
-                header_value.remove_prefix(value_size + (header_value.size() > value_size));
+                value = url_decode_inplace(value, false);
 
                 if (key == "name") {
                   field_name_ = value;
@@ -373,20 +415,16 @@ Result<bool> HttpReader::parse_multipart_form_data() {
           if (has_file_name_) {
             // file
             if (query_->files_.size() == max_files_) {
-              return Status::Error(413, "Request Entity Too Large: too much files attached");
-            }
-            auto file = open_temp_file(file_name_);
-            if (file.is_error()) {
-              return Status::Error(500, "Internal Server Error: can't create temporary file");
+              return Status::Error(413, "Request Entity Too Large: too many files attached");
             }
 
             // don't need to save headers for files
             file_field_name_ = field_name_.str();
-            form_data_parse_state_ = ReadFile;
+            form_data_parse_state_ = FormDataParseState::ReadFile;
           } else {
             // save headers for query parameters. They contain header names
             query_->container_.push_back(std::move(headers));
-            form_data_parse_state_ = ReadPartValue;
+            form_data_parse_state_ = FormDataParseState::ReadPartValue;
           }
 
           continue;
@@ -396,22 +434,22 @@ Result<bool> HttpReader::parse_multipart_form_data() {
           return Status::Error(431, "Request Header Fields Too Large: total headers size exceeded");
         }
         return false;
-      case ReadPartValue:
+      case FormDataParseState::ReadPartValue:
         if (find_boundary(content_->clone(), boundary_, form_data_read_length_)) {
           if (total_parameters_length_ + form_data_read_length_ > MAX_TOTAL_PARAMETERS_LENGTH) {
-            return Status::Error(413, "Request Entity Too Large: too much parameters in form data");
+            return Status::Error(413, "Request Entity Too Large: too many parameters in form data");
           }
 
           query_->container_.emplace_back(content_->cut_head(form_data_read_length_).move_as_buffer_slice());
-          MutableSlice value = query_->container_.back().as_slice();
+          MutableSlice value = query_->container_.back().as_mutable_slice();
           content_->advance(boundary_.size());
           form_data_skipped_length_ += form_data_read_length_ + boundary_.size();
-          form_data_read_length_ = 0;
 
           if (begins_with(field_content_type_, "application/x-www-form-urlencoded")) {
             // treat value as ordinary parameters
             auto result = parse_parameters(value);
             if (result.is_error()) {
+              form_data_read_length_ = 0;
               return std::move(result);
             }
           } else {
@@ -420,17 +458,27 @@ Result<bool> HttpReader::parse_multipart_form_data() {
                        << "\"";
             query_->args_.emplace_back(field_name_, value);
           }
+          form_data_read_length_ = 0;
 
-          form_data_parse_state_ = CheckForLastBoundary;
+          form_data_parse_state_ = FormDataParseState::CheckForLastBoundary;
           continue;
         }
         CHECK(content_->size() < form_data_read_length_ + boundary_.size());
 
         if (total_parameters_length_ + form_data_read_length_ > MAX_TOTAL_PARAMETERS_LENGTH) {
-          return Status::Error(413, "Request Entity Too Large: too much parameters in form data");
+          return Status::Error(413, "Request Entity Too Large: too many parameters in form data");
         }
         return false;
-      case ReadFile: {
+      case FormDataParseState::ReadFile: {
+        if (!can_be_slow) {
+          return Status::Error("SLOW");
+        }
+        if (temp_file_.empty()) {
+          auto open_status = open_temp_file(file_name_);
+          if (open_status.is_error()) {
+            return Status::Error(500, "Internal Server Error: can't create temporary file");
+          }
+        }
         if (find_boundary(content_->clone(), boundary_, form_data_read_length_)) {
           auto file_part = content_->cut_head(form_data_read_length_).move_as_buffer_slice();
           content_->advance(boundary_.size());
@@ -442,7 +490,7 @@ Result<bool> HttpReader::parse_multipart_form_data() {
           query_->files_.emplace_back(file_field_name_, file_name_, field_content_type_, file_size_, temp_file_name_);
           close_temp_file();
 
-          form_data_parse_state_ = CheckForLastBoundary;
+          form_data_parse_state_ = FormDataParseState::CheckForLastBoundary;
           continue;
         }
 
@@ -455,7 +503,7 @@ Result<bool> HttpReader::parse_multipart_form_data() {
         TRY_STATUS(save_file_part(std::move(file_part)));
         return false;
       }
-      case CheckForLastBoundary: {
+      case FormDataParseState::CheckForLastBoundary: {
         if (content_->size() < 2) {
           // need more data
           return false;
@@ -467,13 +515,13 @@ Result<bool> HttpReader::parse_multipart_form_data() {
         if (x[0] == '-' && x[1] == '-') {
           content_->advance(2);
           form_data_skipped_length_ += 2;
-          form_data_parse_state_ = SkipEpilogue;
+          form_data_parse_state_ = FormDataParseState::SkipEpilogue;
         } else {
-          form_data_parse_state_ = ReadPartHeaders;
+          form_data_parse_state_ = FormDataParseState::ReadPartHeaders;
         }
         continue;
       }
-      case SkipEpilogue: {
+      case FormDataParseState::SkipEpilogue: {
         size_t size = content_->size();
         LOG(DEBUG) << "Skipping epilogue. Have " << size << " bytes";
         content_->advance(size);
@@ -500,7 +548,7 @@ Result<size_t> HttpReader::split_header() {
     CHECK(query_->container_.back().size() == headers_read_length_ + 2);
     input_->advance(2);
     total_headers_length_ = headers_read_length_;
-    auto status = parse_head(query_->container_.back().as_slice());
+    auto status = parse_head(query_->container_.back().as_mutable_slice());
     if (status.is_error()) {
       return std::move(status);
     }
@@ -519,14 +567,18 @@ void HttpReader::process_header(MutableSlice header_name, MutableSlice header_va
   to_lower_inplace(header_name);
   LOG(DEBUG) << "Process header [" << header_name << "=>" << header_value << "]";
   query_->headers_.emplace_back(header_name, header_value);
-  // TODO: check if protocol is HTTP/1.1
-  query_->keep_alive_ = true;
   if (header_name == "content-length") {
-    content_length_ = to_integer<size_t>(header_value);
+    auto content_length = to_integer<uint64>(header_value);
+    if (content_length > MAX_CONTENT_SIZE) {
+      content_length = MAX_CONTENT_SIZE;
+    }
+    content_length_ = static_cast<int64>(content_length);
   } else if (header_name == "connection") {
     to_lower_inplace(header_value);
     if (header_value == "close") {
       query_->keep_alive_ = false;
+    } else {
+      query_->keep_alive_ = true;
     }
   } else if (header_name == "content-type") {
     content_type_ = header_value;
@@ -547,7 +599,7 @@ Status HttpReader::parse_url(MutableSlice url) {
     url_path_size++;
   }
 
-  query_->url_path_ = urldecode_inplace({url.data(), url_path_size}, false);
+  query_->url_path_ = url_decode_inplace({url.data(), url_path_size}, false);
 
   if (url_path_size == url.size() || url[url_path_size] != '?') {
     return Status::OK();
@@ -558,7 +610,7 @@ Status HttpReader::parse_url(MutableSlice url) {
 Status HttpReader::parse_parameters(MutableSlice parameters) {
   total_parameters_length_ += parameters.size();
   if (total_parameters_length_ > MAX_TOTAL_PARAMETERS_LENGTH) {
-    return Status::Error(413, "Request Entity Too Large: too much parameters");
+    return Status::Error(413, "Request Entity Too Large: too many parameters");
   }
   LOG(DEBUG) << "Parse parameters: \"" << parameters << "\"";
 
@@ -567,9 +619,9 @@ Status HttpReader::parse_parameters(MutableSlice parameters) {
     auto key_value = parser.read_till_nofail('&');
     parser.skip_nofail('&');
     Parser kv_parser(key_value);
-    auto key = urldecode_inplace(kv_parser.read_till_nofail('='), true);
+    auto key = url_decode_inplace(kv_parser.read_till_nofail('='), true);
     kv_parser.skip_nofail('=');
-    auto value = urldecode_inplace(kv_parser.data(), true);
+    auto value = url_decode_inplace(kv_parser.data(), true);
     query_->args_.emplace_back(key, value);
   }
 
@@ -584,12 +636,24 @@ Status HttpReader::parse_json_parameters(MutableSlice parameters) {
 
   total_parameters_length_ += parameters.size();
   if (total_parameters_length_ > MAX_TOTAL_PARAMETERS_LENGTH) {
-    return Status::Error(413, "Request Entity Too Large: too much parameters");
+    return Status::Error(413, "Request Entity Too Large: too many parameters");
   }
   LOG(DEBUG) << "Parse JSON parameters: \"" << parameters << "\"";
 
   Parser parser(parameters);
   parser.skip_whitespaces();
+  if (parser.peek_char() == '"') {
+    auto r_value = json_string_decode(parser);
+    if (r_value.is_error()) {
+      return Status::Error(400, PSLICE() << "Bad Request: can't parse string content: " << r_value.error().message());
+    }
+    if (!parser.empty()) {
+      return Status::Error(400, "Bad Request: extra data after string");
+    }
+    query_->container_.emplace_back("content");
+    query_->args_.emplace_back(query_->container_.back().as_mutable_slice(), r_value.move_as_ok());
+    return Status::OK();
+  }
   parser.skip('{');
   if (parser.status().is_error()) {
     return Status::Error(400, "Bad Request: JSON object expected");
@@ -643,6 +707,18 @@ Status HttpReader::parse_json_parameters(MutableSlice parameters) {
   return Status::OK();
 }
 
+Status HttpReader::parse_http_version(Slice version) {
+  if (version == "HTTP/1.1") {
+    query_->keep_alive_ = true;
+  } else if (version == "HTTP/1.0") {
+    query_->keep_alive_ = false;
+  } else {
+    LOG(INFO) << "Unsupported HTTP version: " << version;
+    return Status::Error(505, "HTTP Version Not Supported");
+  }
+  return Status::OK();
+}
+
 Status HttpReader::parse_head(MutableSlice head) {
   Parser parser(head);
 
@@ -650,16 +726,12 @@ Status HttpReader::parse_head(MutableSlice head) {
   parser.skip(' ');
   // GET POST HTTP/1.1
   if (type == "GET") {
-    query_->type_ = HttpQuery::Type::GET;
+    query_->type_ = HttpQuery::Type::Get;
   } else if (type == "POST") {
-    query_->type_ = HttpQuery::Type::POST;
+    query_->type_ = HttpQuery::Type::Post;
   } else if (type.size() >= 4 && type.substr(0, 4) == "HTTP") {
-    if (type == "HTTP/1.1" || type == "HTTP/1.0") {
-      query_->type_ = HttpQuery::Type::RESPONSE;
-    } else {
-      LOG(INFO) << "Unsupported HTTP version: " << type;
-      return Status::Error(505, "HTTP Version Not Supported");
-    }
+    TRY_STATUS(parse_http_version(type));
+    query_->type_ = HttpQuery::Type::Response;
   } else {
     LOG(INFO) << "Not Implemented " << tag("type", type) << tag("head", head);
     return Status::Error(501, "Not Implemented");
@@ -667,7 +739,7 @@ Status HttpReader::parse_head(MutableSlice head) {
 
   query_->args_.clear();
 
-  if (query_->type_ == HttpQuery::Type::RESPONSE) {
+  if (query_->type_ == HttpQuery::Type::Response) {
     query_->code_ = to_integer<int32>(parser.read_till(' '));
     parser.skip(' ');
     query_->reason_ = parser.read_till('\r');
@@ -680,23 +752,17 @@ Status HttpReader::parse_head(MutableSlice head) {
     }
 
     TRY_STATUS(parse_url(url_version.substr(0, space_pos)));
-
-    auto http_version = url_version.substr(space_pos + 1);
-    if (http_version != "HTTP/1.1" && http_version != "HTTP/1.0") {
-      LOG(WARNING) << "Unsupported HTTP version: " << http_version;
-      return Status::Error(505, "HTTP Version Not Supported");
-    }
+    TRY_STATUS(parse_http_version(url_version.substr(space_pos + 1)));
   }
   parser.skip('\r');
   parser.skip('\n');
 
-  content_length_ = 0;
+  content_length_ = -1;
   content_type_ = Slice("application/octet-stream");
   content_type_lowercased_ = content_type_.str();
   transfer_encoding_ = Slice();
   content_encoding_ = Slice();
 
-  query_->keep_alive_ = false;
   query_->headers_.clear();
   query_->files_.clear();
   query_->content_ = MutableSlice();
@@ -728,25 +794,20 @@ Status HttpReader::open_temp_file(CSlice desired_file_name) {
   TRY_RESULT(dir, realpath(tmp_dir, true));
   CHECK(!dir.empty());
 
-  auto first_try = try_open_temp_file(dir, desired_file_name);
+  // Create a unique directory for the file
+  TRY_RESULT(directory, mkdtemp(dir, TEMP_DIRECTORY_PREFIX));
+  auto first_try = try_open_temp_file(directory, desired_file_name);
   if (first_try.is_ok()) {
     return Status::OK();
   }
-
-  // Creation of new file with desired name has failed. Trying to create unique directory for it
-  TRY_RESULT(directory, mkdtemp(dir, TEMP_DIRECTORY_PREFIX));
-  auto second_try = try_open_temp_file(directory, desired_file_name);
+  auto second_try = try_open_temp_file(directory, "file");
   if (second_try.is_ok()) {
-    return Status::OK();
-  }
-  auto third_try = try_open_temp_file(directory, "file");
-  if (third_try.is_ok()) {
     return Status::OK();
   }
 
   rmdir(directory).ignore();
-  LOG(WARNING) << "Failed to create temporary file " << desired_file_name << ": " << second_try.error();
-  return second_try.move_as_error();
+  LOG(WARNING) << "Failed to create temporary file \"" << desired_file_name << "\": " << first_try.error();
+  return first_try.move_as_error();
 }
 
 Status HttpReader::try_open_temp_file(Slice directory_name, CSlice desired_file_name) {
@@ -786,7 +847,7 @@ Status HttpReader::save_file_part(BufferSlice &&file_part) {
   auto result_written = temp_file_.write(file_part.as_slice());
   if (result_written.is_error() || result_written.ok() != file_part.size()) {
     clean_temporary_file();
-    return Status::Error(500, "Internal server error: can't upload the file");
+    return Status::Error(500, "Internal Server Error: can't upload the file");
   }
   return Status::OK();
 }

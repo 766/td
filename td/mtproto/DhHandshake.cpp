@@ -1,10 +1,12 @@
 //
-// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2019
+// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2026
 //
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
 //
 #include "td/mtproto/DhHandshake.h"
+
+#include "td/mtproto/DhCallback.h"
 
 #include "td/utils/as.h"
 #include "td/utils/crypto.h"
@@ -14,6 +16,7 @@
 #include "td/utils/UInt.h"
 
 namespace td {
+namespace mtproto {
 
 Status DhHandshake::check_config(Slice prime_str, const BigNum &prime, int32 g_int, BigNumContext &ctx,
                                  DhCallback *callback) {
@@ -23,13 +26,13 @@ Status DhHandshake::check_config(Slice prime_str, const BigNum &prime, int32 g_i
   }
 
   // g generates a cyclic subgroup of prime order (p - 1) / 2, i.e. is a quadratic residue mod p.
-  // Since g is always equal to 2, 3, 4, 5, 6 or 7, this is easily done using quadratic reciprocity law,
+  // Since g is always equal to 2, 3, 4, 5, 6, or 7, this is easily done using quadratic reciprocity law,
   // yielding a simple condition on
   // * p mod 4g - namely, p mod 8 = 7 for g = 2; p mod 3 = 2 for g = 3;
   // * no extra condition for g = 4;
   // * p mod 5 = 1 or 4 for g = 5;
   // * p mod 24 = 19 or 23 for g = 6;
-  // * p mod 7 = 3, 5 or 6 for g = 7.
+  // * p mod 7 = 3, 5, or 6 for g = 7.
 
   bool mod_ok;
   uint32 mod_r;
@@ -225,4 +228,5 @@ int64 DhHandshake::calc_key_id(Slice auth_key) {
   return as<int64>(auth_key_sha1.raw + 12);
 }
 
+}  // namespace mtproto
 }  // namespace td

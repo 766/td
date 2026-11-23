@@ -1,19 +1,21 @@
 //
-// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2019
+// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2026
 //
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
 //
 #include "td/telegram/misc.h"
 
+#include "td/utils/algorithm.h"
+#include "td/utils/as.h"
+#include "td/utils/bits.h"
 #include "td/utils/common.h"
-#include "td/utils/HttpUrl.h"
-#include "td/utils/logging.h"
+#include "td/utils/crypto.h"
+#include "td/utils/Hints.h"
 #include "td/utils/misc.h"
 #include "td/utils/Slice.h"
 #include "td/utils/utf8.h"
 
-#include <algorithm>
 #include <cstring>
 #include <limits>
 
@@ -48,12 +50,31 @@ string clean_name(string str, size_t max_length) {
 }
 
 string clean_username(string str) {
-  str.resize(std::remove(str.begin(), str.end(), '.') - str.begin());
-  return trim(to_lower(str));
+  td::remove(str, '.');
+  to_lower_inplace(str);
+  return trim(str);
+}
+
+void clean_phone_number(string &phone_number) {
+  td::remove_if(phone_number, [](char c) { return !is_digit(c); });
+}
+
+void replace_offending_characters(string &str) {
+  // "(\xe2\x80\x8f|\xe2\x80\x8e){N}(\xe2\x80\x8f|\xe2\x80\x8e)" -> "(\xe2\x80\x8c){N}$2"
+  auto s = MutableSlice(str).ubegin();
+  for (size_t pos = 0; pos < str.size(); pos++) {
+    if (s[pos] == 0xe2 && s[pos + 1] == 0x80 && (s[pos + 2] == 0x8e || s[pos + 2] == 0x8f)) {
+      while (s[pos + 3] == 0xe2 && s[pos + 4] == 0x80 && (s[pos + 5] == 0x8e || s[pos + 5] == 0x8f)) {
+        s[pos + 2] = static_cast<unsigned char>(0x8c);
+        pos += 3;
+      }
+      pos += 2;
+    }
+  }
 }
 
 bool clean_input_string(string &str) {
-  constexpr size_t LENGTH_LIMIT = 35000;  // server side limit
+  constexpr size_t LENGTH_LIMIT = 35000;  // server-side limit
   if (!check_utf8(str)) {
     return false;
   }
@@ -61,7 +82,7 @@ bool clean_input_string(string &str) {
   size_t str_size = str.size();
   size_t new_size = 0;
   for (size_t pos = 0; pos < str_size; pos++) {
-    unsigned char c = static_cast<unsigned char>(str[pos]);
+    auto c = static_cast<unsigned char>(str[pos]);
     switch (c) {
       // remove control characters
       case 0:
@@ -105,7 +126,7 @@ bool clean_input_string(string &str) {
       default:
         // remove \xe2\x80[\xa8-\xae]
         if (c == 0xe2 && pos + 2 < str_size) {
-          unsigned char next = static_cast<unsigned char>(str[pos + 1]);
+          auto next = static_cast<unsigned char>(str[pos + 1]);
           if (next == 0x80) {
             next = static_cast<unsigned char>(str[pos + 2]);
             if (0xa8 <= next && next <= 0xae) {
@@ -116,7 +137,7 @@ bool clean_input_string(string &str) {
         }
         // remove vertical lines \xcc[\xb3\xbf\x8a]
         if (c == 0xcc && pos + 1 < str_size) {
-          unsigned char next = static_cast<unsigned char>(str[pos + 1]);
+          auto next = static_cast<unsigned char>(str[pos + 1]);
           if (next == 0xb3 || next == 0xbf || next == 0x8a) {
             pos++;
             break;
@@ -133,25 +154,29 @@ bool clean_input_string(string &str) {
   }
 
   str.resize(new_size);
+
+  replace_offending_characters(str);
+
   return true;
 }
 
-string strip_empty_characters(string str, size_t max_length) {
+string strip_empty_characters(string str, size_t max_length, bool strip_rtlo) {
   static const char *space_characters[] = {u8"\u1680", u8"\u180E", u8"\u2000", u8"\u2001", u8"\u2002",
                                            u8"\u2003", u8"\u2004", u8"\u2005", u8"\u2006", u8"\u2007",
-                                           u8"\u2008", u8"\u2009", u8"\u200A", u8"\u200B", u8"\u202F",
-                                           u8"\u205F", u8"\u3000", u8"\uFEFF", u8"\uFFFC"};
+                                           u8"\u2008", u8"\u2009", u8"\u200A", u8"\u202E", u8"\u202F",
+                                           u8"\u205F", u8"\u2800", u8"\u3000", u8"\uFFFC"};
   static bool can_be_first[std::numeric_limits<unsigned char>::max() + 1];
   static bool can_be_first_inited = [&] {
     for (auto space_ch : space_characters) {
       CHECK(std::strlen(space_ch) == 3);
       can_be_first[static_cast<unsigned char>(space_ch[0])] = true;
     }
+    can_be_first[0xF3] = true;
     return true;
   }();
   CHECK(can_be_first_inited);
 
-  // replace all occurences of space characters with a space
+  // replace all occurrences of space characters with a space
   size_t i = 0;
   while (i < str.size() && !can_be_first[static_cast<unsigned char>(str[i])]) {
     i++;
@@ -159,17 +184,29 @@ string strip_empty_characters(string str, size_t max_length) {
   size_t new_len = i;
   while (i < str.size()) {
     if (can_be_first[static_cast<unsigned char>(str[i])] && i + 3 <= str.size()) {
-      bool found = false;
-      for (auto space_ch : space_characters) {
-        if (space_ch[0] == str[i] && space_ch[1] == str[i + 1] && space_ch[2] == str[i + 2]) {
-          found = true;
-          break;
+      if (static_cast<unsigned char>(str[i]) == 0xF3) {
+        if (static_cast<unsigned char>(str[i + 1]) == 0xA0 && (static_cast<unsigned char>(str[i + 2]) & 0xFE) == 0x80 &&
+            i + 4 <= str.size()) {
+          str[new_len++] = ' ';
+          i += 4;
+          continue;
         }
-      }
-      if (found) {
-        str[new_len++] = ' ';
-        i += 3;
-        continue;
+      } else {
+        bool found = false;
+        for (auto space_ch : space_characters) {
+          if (space_ch[0] == str[i] && space_ch[1] == str[i + 1] && space_ch[2] == str[i + 2]) {
+            if (static_cast<unsigned char>(str[i + 2]) != 0xAE || static_cast<unsigned char>(str[i + 1]) != 0x80 ||
+                static_cast<unsigned char>(str[i]) != 0xE2 || strip_rtlo) {
+              found = true;
+            }
+            break;
+          }
+        }
+        if (found) {
+          str[new_len++] = ' ';
+          i += 3;
+          continue;
+        }
       }
     }
     str[new_len++] = str[i++];
@@ -177,9 +214,13 @@ string strip_empty_characters(string str, size_t max_length) {
   Slice trimmed = trim(utf8_truncate(trim(Slice(str.c_str(), new_len)), max_length));
 
   // check if there is some non-empty character, empty characters:
+  // "\xE2\x80\x8B", ZERO WIDTH SPACE
   // "\xE2\x80\x8C", ZERO WIDTH NON-JOINER
   // "\xE2\x80\x8D", ZERO WIDTH JOINER
+  // "\xE2\x80\x8E", LEFT-TO-RIGHT MARK
+  // "\xE2\x80\x8F", RIGHT-TO-LEFT MARK
   // "\xE2\x80\xAE", RIGHT-TO-LEFT OVERRIDE
+  // "\xEF\xBB\xBF", ZERO WIDTH NO-BREAK SPACE aka BYTE ORDER MARK
   // "\xC2\xA0", NO-BREAK SPACE
   for (i = 0;;) {
     if (i == trimmed.size()) {
@@ -191,9 +232,15 @@ string strip_empty_characters(string str, size_t max_length) {
       i++;
       continue;
     }
-    if (static_cast<unsigned char>(trimmed[i]) == 0xE2 && static_cast<unsigned char>(trimmed[i + 1]) == 0x80 &&
-        (static_cast<unsigned char>(trimmed[i + 2]) == 0x8C || static_cast<unsigned char>(trimmed[i + 2]) == 0x8D ||
-         static_cast<unsigned char>(trimmed[i + 2]) == 0xAE)) {
+    if (static_cast<unsigned char>(trimmed[i]) == 0xE2 && static_cast<unsigned char>(trimmed[i + 1]) == 0x80) {
+      auto next = static_cast<unsigned char>(trimmed[i + 2]);
+      if ((0x8B <= next && next <= 0x8F) || next == 0xAE) {
+        i += 3;
+        continue;
+      }
+    }
+    if (static_cast<unsigned char>(trimmed[i]) == 0xEF && static_cast<unsigned char>(trimmed[i + 1]) == 0xBB &&
+        static_cast<unsigned char>(trimmed[i + 2]) == 0xBF) {
       i += 3;
       continue;
     }
@@ -210,14 +257,69 @@ bool is_empty_string(const string &str) {
   return strip_empty_characters(str, str.size()).empty();
 }
 
-int32 get_vector_hash(const vector<uint32> &numbers) {
-  uint32 acc = 0;
-  for (auto number : numbers) {
-    acc = acc * 20261 + number;
+bool is_valid_username(Slice username) {
+  if (username.empty() || username.size() > 32) {
+    return false;
   }
-  return static_cast<int32>(acc & 0x7FFFFFFF);
+  if (!is_alpha(username[0])) {
+    return false;
+  }
+  for (auto c : username) {
+    if (!is_alpha(c) && !is_digit(c) && c != '_') {
+      return false;
+    }
+  }
+  if (username.back() == '_') {
+    return false;
+  }
+  for (size_t i = 1; i < username.size(); i++) {
+    if (username[i - 1] == '_' && username[i] == '_') {
+      return false;
+    }
+  }
+
+  return true;
 }
 
+bool is_allowed_username(Slice username) {
+  if (!is_valid_username(username)) {
+    return false;
+  }
+  if (username.size() < 5) {
+    return false;
+  }
+  auto username_lowered = to_lower(username);
+  if (username_lowered.find("admin") == 0 || username_lowered.find("telegram") == 0 ||
+      username_lowered.find("support") == 0 || username_lowered.find("security") == 0 ||
+      username_lowered.find("settings") == 0 || username_lowered.find("contacts") == 0 ||
+      username_lowered.find("service") == 0 || username_lowered.find("telegraph") == 0) {
+    return false;
+  }
+  return true;
+}
+
+uint64 get_md5_string_hash(const string &str) {
+  unsigned char hash[16];
+  md5(str, {hash, sizeof(hash)});
+  uint64 result = 0;
+  for (int i = 0; i <= 7; i++) {
+    result += static_cast<uint64>(hash[i]) << (56 - 8 * i);
+  }
+  return result;
+}
+
+int64 get_vector_hash(const vector<uint64> &numbers) {
+  uint64 acc = 0;
+  for (auto number : numbers) {
+    acc ^= acc >> 21;
+    acc ^= acc << 35;
+    acc ^= acc >> 4;
+    acc += number;
+  }
+  return static_cast<int64>(acc);
+}
+
+// returns emoji corresponding to the specified number
 string get_emoji_fingerprint(uint64 num) {
   static const vector<Slice> emojis{
       u8"\U0001f609", u8"\U0001f60d", u8"\U0001f61b", u8"\U0001f62d", u8"\U0001f631", u8"\U0001f621", u8"\U0001f60e",
@@ -275,36 +377,80 @@ string get_emoji_fingerprint(uint64 num) {
   return emojis[static_cast<size_t>((num & 0x7FFFFFFFFFFFFFFF) % emojis.size())].str();
 }
 
-Result<string> check_url(Slice url) {
-  bool is_tg = false;
-  if (begins_with(url, "tg://")) {
-    url.remove_prefix(5);
-    is_tg = true;
-  } else if (begins_with(url, "tg:")) {
-    url.remove_prefix(3);
-    is_tg = true;
-  } else {
-    is_tg = false;
+vector<string> get_emoji_fingerprints(const unsigned char *buffer) {
+  vector<string> result;
+  result.reserve(4);
+  for (int i = 0; i < 4; i++) {
+    uint64 num = big_endian_to_host64(as<uint64>(buffer + 8 * i));
+    result.push_back(get_emoji_fingerprint(num));
   }
-  TRY_RESULT(http_url, parse_url(url));
-  if (is_tg) {
-    if (begins_with(url, "http://") || http_url.protocol_ == HttpUrl::Protocol::HTTPS || !http_url.userinfo_.empty() ||
-        http_url.specified_port_ != 0 || http_url.is_ipv6_) {
-      return Status::Error("Wrong tg URL");
-    }
+  return result;
+}
 
-    Slice query(http_url.query_);
-    CHECK(query[0] == '/');
-    if (query[1] == '?') {
-      query.remove_prefix(1);
-    }
-    return PSTRING() << "tg://" << http_url.host_ << query;
-  }
+bool check_currency_amount(int64 amount) {
+  constexpr int64 MAX_AMOUNT = 9999'9999'9999;
+  return -MAX_AMOUNT <= amount && amount <= MAX_AMOUNT;
+}
 
-  if (url.find('.') == string::npos) {
-    return Status::Error("Wrong HTTP URL");
+Status validate_bot_language_code(const string &language_code) {
+  if (language_code.empty()) {
+    return Status::OK();
   }
-  return http_url.get_url();
+  if (language_code.size() == 2 && 'a' <= language_code[0] && language_code[0] <= 'z' && 'a' <= language_code[1] &&
+      language_code[1] <= 'z') {
+    return Status::OK();
+  }
+  return Status::Error(400, "Invalid language code specified");
+}
+
+vector<int32> search_strings_by_prefix(const vector<string> &strings, const string &query, int32 limit,
+                                       bool return_all_for_empty_query, int32 &total_count) {
+  Hints hints;
+  for (size_t i = 0; i < strings.size(); i++) {
+    const auto &str = strings[i];
+    hints.add(i, str.empty() ? Slice(" ") : Slice(str));
+    hints.set_rating(i, i);
+  }
+  auto result = hints.search(query, limit, return_all_for_empty_query);
+  total_count = narrow_cast<int32>(result.first);
+  return transform(result.second, [](int64 key) { return narrow_cast<int32>(key); });
+}
+
+int32 get_premium_duration_month_count(int32 day_count) {
+  return max(static_cast<int32>(1), day_count / 30);
+}
+
+int32 get_premium_duration_day_count(int32 month_count) {
+  if (month_count <= 0 || month_count > 10000000) {
+    return 7;
+  }
+  return month_count * 30 + month_count / 3 + month_count / 12;
+}
+
+bool is_valid_color(int32 color) {
+  return 0 <= color && color <= 0xFFFFFF;
+}
+
+void find_authentication_codes(Slice text, vector<string> &authentication_codes) {
+  for (size_t i = 0; i < text.size(); i++) {
+    if (is_digit(text[i])) {
+      string code;
+      while (i < text.size()) {
+        if (is_digit(text[i])) {
+          code += text[i++];
+          continue;
+        }
+        if (text[i] == '-') {
+          i++;
+          continue;
+        }
+        break;
+      };
+      if (5 <= code.size() && code.size() <= 7) {
+        authentication_codes.push_back(code);
+      }
+    }
+  }
 }
 
 }  // namespace td

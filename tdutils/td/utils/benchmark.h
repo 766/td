@@ -1,11 +1,12 @@
 //
-// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2019
+// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2026
 //
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
 //
 #pragma once
 
+#include "td/utils/common.h"
 #include "td/utils/format.h"
 #include "td/utils/logging.h"
 #include "td/utils/port/Clocks.h"
@@ -15,14 +16,14 @@
 #include <tuple>
 #include <utility>
 
-#define BENCH(name, desc)                          \
-  class name##Bench : public ::td::Benchmark {     \
-   public:                                         \
-    std::string get_description() const override { \
-      return (desc);                               \
-    }                                              \
-    void run(int n) override;                      \
-  };                                               \
+#define BENCH(name, desc)                            \
+  class name##Bench final : public ::td::Benchmark { \
+   public:                                           \
+    std::string get_description() const final {      \
+      return (desc);                                 \
+    }                                                \
+    void run(int n) final;                           \
+  };                                                 \
   void name##Bench::run(int n)
 
 namespace td {

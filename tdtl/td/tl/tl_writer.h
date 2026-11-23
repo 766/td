@@ -1,12 +1,12 @@
 //
-// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2019
+// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2026
 //
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
 //
 #pragma once
 
-#include "tl_core.h"
+#include "td/tl/tl_core.h"
 
 #include <cstdint>
 #include <string>
@@ -56,6 +56,8 @@ class TL_writer {
   virtual bool is_type_bare(const tl_type *t) const = 0;
   virtual bool is_combinator_supported(const tl_combinator *constructor) const;
   virtual bool is_documentation_generated() const;
+  virtual bool is_default_constructor_generated(const tl_combinator *t, bool can_be_parsed, bool can_be_stored) const;
+  virtual bool is_full_constructor_generated(const tl_combinator *t, bool can_be_parsed, bool can_be_stored) const;
 
   virtual int get_parser_type(const tl_combinator *t, const std::string &parser_name) const;
   virtual int get_storer_type(const tl_combinator *t, const std::string &storer_name) const;
@@ -81,13 +83,17 @@ class TL_writer {
 
   virtual std::string gen_int_const(const tl_tree *tree_c, const std::vector<var_description> &vars) const = 0;
 
-  virtual std::string gen_output_begin() const = 0;
+  virtual std::string gen_output_begin(const std::string &additional_imports) const = 0;
+  virtual std::string gen_output_begin_once() const = 0;
   virtual std::string gen_output_end() const = 0;
+
+  virtual std::string gen_import_declaration(const std::string &name, bool is_system) const = 0;
+  virtual std::string gen_package_suffix() const = 0;
 
   virtual std::string gen_forward_class_declaration(const std::string &class_name, bool is_proxy) const = 0;
 
-  virtual std::string gen_class_begin(const std::string &class_name, const std::string &base_class_name,
-                                      bool is_proxy) const = 0;
+  virtual std::string gen_class_begin(const std::string &class_name, const std::string &base_class_name, bool is_proxy,
+                                      const tl_tree *result) const = 0;
   virtual std::string gen_class_end() const = 0;
 
   virtual std::string gen_class_alias(const std::string &class_name, const std::string &alias_name) const = 0;
@@ -106,8 +112,8 @@ class TL_writer {
   virtual std::string gen_constructor_id_store(std::int32_t id, int storer_type) const = 0;
   virtual std::string gen_field_fetch(int field_num, const arg &a, std::vector<var_description> &vars, bool flat,
                                       int parser_type) const = 0;
-  virtual std::string gen_field_store(const arg &a, std::vector<var_description> &vars, bool flat,
-                                      int storer_type) const = 0;
+  virtual std::string gen_field_store(const arg &a, const std::vector<arg> &args, std::vector<var_description> &vars,
+                                      bool flat, int storer_type) const = 0;
   virtual std::string gen_type_fetch(const std::string &field_name, const tl_tree_type *tree_type,
                                      const std::vector<var_description> &vars, int parser_type) const = 0;
   virtual std::string gen_type_store(const std::string &field_name, const tl_tree_type *tree_type,
@@ -119,9 +125,9 @@ class TL_writer {
   virtual std::string gen_function_result_type(const tl_tree *result) const = 0;
 
   virtual std::string gen_fetch_function_begin(const std::string &parser_name, const std::string &class_name,
-                                               const std::string &parent_class_name, int arity,
+                                               const std::string &parent_class_name, int arity, int field_count,
                                                std::vector<var_description> &vars, int parser_type) const = 0;
-  virtual std::string gen_fetch_function_end(bool has_parent, int field_num, const std::vector<var_description> &vars,
+  virtual std::string gen_fetch_function_end(bool has_parent, int field_count, const std::vector<var_description> &vars,
                                              int parser_type) const = 0;
 
   virtual std::string gen_fetch_function_result_begin(const std::string &parser_name, const std::string &class_name,
@@ -139,12 +145,12 @@ class TL_writer {
   virtual std::string gen_fetch_switch_case(const tl_combinator *t, int arity) const = 0;
   virtual std::string gen_fetch_switch_end() const = 0;
 
-  virtual std::string gen_constructor_begin(int fields_num, const std::string &class_name, bool is_default) const = 0;
+  virtual std::string gen_constructor_begin(int field_count, const std::string &class_name, bool is_default) const = 0;
   virtual std::string gen_constructor_parameter(int field_num, const std::string &class_name, const arg &a,
                                                 bool is_default) const = 0;
   virtual std::string gen_constructor_field_init(int field_num, const std::string &class_name, const arg &a,
                                                  bool is_default) const = 0;
-  virtual std::string gen_constructor_end(const tl_combinator *t, int fields_num, bool is_default) const = 0;
+  virtual std::string gen_constructor_end(const tl_combinator *t, int field_count, bool is_default) const = 0;
 
   virtual std::string gen_additional_function(const std::string &function_name, const tl_combinator *t,
                                               bool is_function) const;

@@ -1,5 +1,5 @@
 //
-// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2019
+// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2026
 //
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
@@ -14,8 +14,6 @@
 #include "td/telegram/VideoNotesManager.h"
 #include "td/telegram/VideosManager.h"
 
-#include "td/utils/misc.h"
-
 namespace td {
 
 vector<FileId> Document::get_file_ids(const Td *td) const {
@@ -25,16 +23,16 @@ vector<FileId> Document::get_file_ids(const Td *td) const {
 }
 
 void Document::append_file_ids(const Td *td, vector<FileId> &file_ids) const {
-  if (!file_id.is_valid() || empty()) {
+  if (!file_id.is_valid() || is_empty()) {
     return;
   }
 
   if (type == Type::Sticker) {
-    append(file_ids, td->stickers_manager_->get_sticker_file_ids(file_id));
-    return;
+    return td->stickers_manager_->append_sticker_file_ids(file_id, file_ids);
   }
 
   file_ids.push_back(file_id);
+
   FileId thumbnail_file_id = [&] {
     switch (type) {
       case Type::Animation:
@@ -54,6 +52,32 @@ void Document::append_file_ids(const Td *td, vector<FileId> &file_ids) const {
   if (thumbnail_file_id.is_valid()) {
     file_ids.push_back(thumbnail_file_id);
   }
+
+  FileId animated_thumbnail_file_id = [&] {
+    switch (type) {
+      case Type::Animation:
+        return td->animations_manager_->get_animation_animated_thumbnail_file_id(file_id);
+      case Type::Video:
+        return td->videos_manager_->get_video_animated_thumbnail_file_id(file_id);
+      default:
+        return FileId();
+    }
+  }();
+  if (animated_thumbnail_file_id.is_valid()) {
+    file_ids.push_back(animated_thumbnail_file_id);
+  }
+
+  if (type == Type::Audio) {
+    td->audios_manager_->append_audio_album_cover_file_ids(file_id, file_ids);
+  }
+}
+
+bool operator==(const Document &lhs, const Document &rhs) {
+  return lhs.type == rhs.type && lhs.file_id == rhs.file_id;
+}
+
+bool operator!=(const Document &lhs, const Document &rhs) {
+  return !(lhs == rhs);
 }
 
 StringBuilder &operator<<(StringBuilder &string_builder, const Document::Type &document_type) {

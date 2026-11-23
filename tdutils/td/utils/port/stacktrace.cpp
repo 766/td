@@ -1,11 +1,13 @@
 //
-// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2019
+// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2026
 //
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
 //
 #include "td/utils/port/stacktrace.h"
 
+#include "td/utils/port/config.h"
+#include "td/utils/port/platform.h"
 #include "td/utils/port/signals.h"
 
 #if __GLIBC__
@@ -26,17 +28,29 @@ namespace td {
 
 namespace {
 
-void print_backtrace(void) {
-#if __GLIBC__
+void print_backtrace() {
+#if TD_PORT_WINDOWS
+  void *buffer[128];
+  USHORT nptrs = CaptureStackBackTrace(0, 128, buffer, nullptr);
+#elif __GLIBC__
   void *buffer[128];
   int nptrs = backtrace(buffer, 128);
-  signal_safe_write("------- Stack Backtrace -------\n", false);
-  backtrace_symbols_fd(buffer, nptrs, 2);
-  signal_safe_write("-------------------------------\n", false);
+#else
+  return;
 #endif
+
+  signal_safe_write("------- Stack Backtrace -------\n", false);
+#if TD_PORT_WINDOWS
+  for (USHORT i = 0; i < nptrs; i++) {
+    signal_safe_write_pointer(buffer[i], false);
+  }
+#elif __GLIBC__
+  backtrace_symbols_fd(buffer, nptrs, 2);
+#endif
+  signal_safe_write("-------------------------------\n", false);
 }
 
-void print_backtrace_gdb(void) {
+void print_backtrace_gdb() {
 #if TD_LINUX || TD_FREEBSD
   char pid_buf[30];
   char *pid_buf_begin = pid_buf + sizeof(pid_buf);
@@ -53,10 +67,12 @@ void print_backtrace_gdb(void) {
     name_buf[res] = 0;
 
 #if TD_LINUX
+#if defined(PR_SET_DUMPABLE)
     if (prctl(PR_SET_DUMPABLE, 1, 0, 0, 0) < 0) {
       signal_safe_write("Can't set dumpable\n");
       return;
     }
+#endif
 #if defined(PR_SET_PTRACER)
     // We can't use event fd because we are in a signal handler
     int fds[2];
@@ -108,10 +124,18 @@ void print_backtrace_gdb(void) {
 }  // namespace
 
 void Stacktrace::print_to_stderr(const PrintOptions &options) {
+  print_backtrace();
   if (options.use_gdb) {
     print_backtrace_gdb();
   }
-  print_backtrace();
+}
+
+void Stacktrace::init() {
+#if __GLIBC__
+  // backtrace needs to be called once to ensure that next calls are async-signal-safe
+  void *buffer[1];
+  backtrace(buffer, 1);
+#endif
 }
 
 }  // namespace td

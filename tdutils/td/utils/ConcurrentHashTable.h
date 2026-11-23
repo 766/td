@@ -1,5 +1,5 @@
 //
-// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2019
+// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2026
 //
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
@@ -57,8 +57,8 @@ class AtomicHashArray {
   template <class F>
   bool with_value(KeyT key, bool should_create, F &&f) {
     DCHECK(key != empty_key());
-    size_t pos = static_cast<size_t>(key) % nodes_.size();
-    size_t n = td::min(td::max(static_cast<size_t>(300), nodes_.size() / 16 + 2), nodes_.size());
+    auto pos = static_cast<size_t>(key) % nodes_.size();
+    auto n = td::min(td::max(static_cast<size_t>(300), nodes_.size() / 16 + 2), nodes_.size());
 
     for (size_t i = 0; i < n; i++) {
       pos++;
@@ -113,7 +113,7 @@ class ConcurrentHashMap {
   }
 
   static std::string get_name() {
-    return "ConcurrrentHashMap";
+    return "ConcurrentHashMap";
   }
 
   static KeyT empty_key() {
@@ -209,12 +209,15 @@ class ConcurrentHashMap {
   int migrate_generation_{0};
   HashMap *migrate_from_hash_map_{nullptr};
   HashMap *migrate_to_hash_map_{nullptr};
+
   struct Task {
     size_t begin;
     size_t end;
+
     bool empty() const {
       return begin >= end;
     }
+
     size_t size() const {
       if (empty()) {
         return 0;
@@ -224,9 +227,10 @@ class ConcurrentHashMap {
   };
 
   struct TaskCreator {
-    size_t chunk_size;
-    size_t size;
+    size_t chunk_size{0};
+    size_t size{0};
     std::atomic<size_t> pos{0};
+
     Task create() {
       auto i = pos++;
       auto begin = i * chunk_size;
@@ -308,7 +312,6 @@ class ConcurrentHashMap {
         continue;
       }
       auto node_key = node.key.load(std::memory_order_relaxed);
-      //LOG(ERROR) << node_key << " " << node_key;
       auto ok = migrate_to_hash_map_->with_value(
           node_key, true, [&](auto &node_value) { node_value.store(old_value, std::memory_order_relaxed); });
       LOG_CHECK(ok) << "Migration overflow";
@@ -317,6 +320,6 @@ class ConcurrentHashMap {
 };
 
 template <class KeyT, class ValueT>
-td::HazardPointers<typename ConcurrentHashMap<KeyT, ValueT>::HashMap> ConcurrentHashMap<KeyT, ValueT>::hp_(64);
+HazardPointers<typename ConcurrentHashMap<KeyT, ValueT>::HashMap> ConcurrentHashMap<KeyT, ValueT>::hp_(64);
 
 }  // namespace td

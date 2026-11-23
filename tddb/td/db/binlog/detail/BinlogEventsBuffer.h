@@ -1,5 +1,5 @@
 //
-// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2019
+// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2026
 //
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
@@ -12,6 +12,7 @@
 
 namespace td {
 namespace detail {
+
 class BinlogEventsBuffer {
  public:
   void add_event(BinlogEvent &&event);
@@ -24,7 +25,7 @@ class BinlogEventsBuffer {
       auto &event = events_[i];
       if (i + 1 != ids_.size() && (event.flags_ & BinlogEvent::Flags::Partial) == 0) {
         callback(BinlogEvent(BinlogEvent::create_raw(event.id_, event.type_, event.flags_ | BinlogEvent::Flags::Partial,
-                                                     create_storer(event.data_)),
+                                                     create_storer(event.get_data())),
                              BinlogDebugInfo{__FILE__, __LINE__}));
       } else {
         callback(std::move(event));
@@ -45,5 +46,6 @@ class BinlogEventsBuffer {
   void do_event(BinlogEvent &&event);
   void clear();
 };
+
 }  // namespace detail
 }  // namespace td

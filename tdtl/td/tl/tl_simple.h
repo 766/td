@@ -1,5 +1,5 @@
 //
-// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2019
+// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2026
 //
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
@@ -21,21 +21,20 @@
 namespace td {
 namespace tl {
 namespace simple {
-// TL type is
 
-std::string gen_cpp_name(std::string name) {
-  for (std::size_t i = 0; i < name.size(); i++) {
-    if ((name[i] < '0' || '9' < name[i]) && (name[i] < 'a' || 'z' < name[i]) && (name[i] < 'A' || 'Z' < name[i])) {
-      name[i] = '_';
+inline std::string gen_cpp_name(std::string name) {
+  for (auto &c : name) {
+    if ((c < '0' || '9' < c) && (c < 'a' || 'z' < c) && (c < 'A' || 'Z' < c)) {
+      c = '_';
     }
   }
-  assert(name.size() > 0);
+  assert(!name.empty());
   assert(name[name.size() - 1] != '_');
   return name;
 }
 
-std::string gen_cpp_field_name(std::string name) {
-  return gen_cpp_name(name) + "_";
+inline std::string gen_cpp_field_name(std::string name) {
+  return gen_cpp_name(name) + '_';
 }
 
 struct CustomType;
@@ -132,9 +131,11 @@ class Schema {
   void mark_result(const Type *type) {
     do_mark(type, true);
   }
+
   void mark_query(const Type *type) {
     do_mark(type, false);
   }
+
   void do_mark(const Type *type, bool is_result) {
     if (type->type == Type::Vector) {
       return do_mark(type->vector_value_type, is_result);
@@ -190,6 +191,7 @@ class Schema {
     }
     return type;
   }
+
   const CustomType *get_custom_type(const tl_type *from_type) {
     auto *type = get_type(from_type);
     assert(type->type == Type::Custom);
@@ -213,6 +215,7 @@ class Schema {
     }
     return constructor;
   }
+
   const Function *get_function(const tl_combinator *from) {
     auto &function = function_by_id[from->id];
     if (!function) {
@@ -230,6 +233,7 @@ class Schema {
     }
     return function;
   }
+
   const Type *get_type(const tl_tree *tree) {
     assert(tree->get_type() == NODE_TYPE_TYPE);
     auto *type_tree = static_cast<const tl_tree_type *>(tree);

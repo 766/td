@@ -3,7 +3,6 @@ import log from './logger.js';
 import { instantiateAny } from './wasm-utils.js';
 
 import td_wasm_release from './prebuilt/release/td_wasm.wasm';
-import td_asmjs_mem_release from './prebuilt/release/td_asmjs.js.mem';
 
 const tdlibVersion = 6;
 const localForageDrivers = [
@@ -63,69 +62,36 @@ async function initLocalForage() {
 
 async function loadTdlibWasm(onFS, wasmUrl) {
   console.log('loadTdlibWasm');
-  const Module = await import('./prebuilt/release/td_wasm.js');
-  log.info('got td_wasm.js');
+  const td_module = await import('./prebuilt/release/td_wasm.js');
+  const createTdwebModule = td_module.default;
+  log.info('receive td_wasm.js', td_module, createTdwebModule);
   let td_wasm = td_wasm_release;
   if (wasmUrl) {
     td_wasm = wasmUrl;
   }
-  const module = Module.default({
+  let module = createTdwebModule({
     onRuntimeInitialized: () => {
-      log.info('runtime intialized');
+      log.info('runtime initialized');
+      onFS(module.FS);
     },
     instantiateWasm: (imports, successCallback) => {
-      log.info('start instantiateWasm', td_wasm);
+      log.info('start instantiateWasm', td_wasm, imports);
       const next = instance => {
         log.info('finish instantiateWasm');
         successCallback(instance);
       };
       instantiateAny(tdlibVersion, td_wasm, imports).then(next);
       return {};
-    },
-    ENVIROMENT: 'WORKER'
+    }
   });
-  log.info('Got module', module);
-  onFS(module.FS);
-  const TdModule = new Promise((resolve, reject) =>
-    module.then(m => {
-      delete m.then;
-      resolve(m);
-    })
-  );
-
-  return TdModule;
+  log.info('Wait module');
+  module = await module;
+  log.info('Loaded module', module);
+  //onFS(module.FS);
+  return module;
 }
 
-async function loadTdlibAsmjs(onFS) {
-  console.log('loadTdlibAsmjs');
-  const Module = await import('./prebuilt/release/td_asmjs.js');
-  console.log('got td_asm.js');
-  const fromFile = 'td_asmjs.js.mem';
-  const toFile = td_asmjs_mem_release;
-  const module = Module.default({
-    onRuntimeInitialized: () => {
-      console.log('runtime intialized');
-    },
-    locateFile: name => {
-      if (name === fromFile) {
-        return toFile;
-      }
-      return name;
-    },
-    ENVIROMENT: 'WORKER'
-  });
-  onFS(module.FS);
-  const TdModule = new Promise((resolve, reject) =>
-    module.then(m => {
-      delete m.then;
-      resolve(m);
-    })
-  );
-
-  return TdModule;
-}
-
-async function loadTdlib(mode, onFS, wasmUrl) {
+async function loadTdlib(onFS, wasmUrl) {
   const wasmSupported = (() => {
     try {
       if (
@@ -144,17 +110,9 @@ async function loadTdlib(mode, onFS, wasmUrl) {
     return false;
   })();
   if (!wasmSupported) {
-    if (mode === 'wasm') {
-      log.error('WebAssembly is not supported, trying to use it anyway');
-    } else {
-      log.warn('WebAssembly is not supported, trying to use asm.js');
-      mode = 'asmjs';
-    }
+    log.error('WebAssembly is not supported, trying to use it anyway');
   }
 
-  if (mode === 'asmjs') {
-    return loadTdlibAsmjs(onFS);
-  }
   return loadTdlibWasm(onFS, wasmUrl);
 }
 
@@ -580,7 +538,7 @@ class TdClient {
         await localforage.setItem('hello', 'world');
         console.log('B');
         const x = await localforage.getItem('hello');
-        console.log('got ', x);
+        console.log('receive ', x);
         await localforage.clear();
         console.log('C');
       } catch (error) {
@@ -598,7 +556,6 @@ class TdClient {
     this.wasInit = true;
 
     options = options || {};
-    const mode = options.mode || 'wasm';
 
     const FS_promise = new Promise(resolve => {
       this.onFS = resolve;
@@ -616,27 +573,35 @@ class TdClient {
     }
 
     log.info('load TdModule');
-    this.TdModule = await loadTdlib(mode, this.onFS, options.wasmUrl);
-    log.info('got TdModule');
+    this.TdModule = await loadTdlib(this.onFS, options.wasmUrl);
+    log.info('loaded TdModule');
     this.td_functions = {
-      td_create: this.TdModule.cwrap('td_create', 'number', []),
-      td_destroy: this.TdModule.cwrap('td_destroy', null, ['number']),
-      td_send: this.TdModule.cwrap('td_send', null, ['number', 'string']),
-      td_execute: this.TdModule.cwrap('td_execute', 'string', [
+      td_create: this.TdModule.cwrap(
+        'td_emscripten_create_client_id',
+        'number',
+        []
+      ),
+      td_send: this.TdModule.cwrap('td_emscripten_send', null, [
         'number',
         'string'
       ]),
-      td_receive: this.TdModule.cwrap('td_receive', 'string', ['number']),
+      td_execute: this.TdModule.cwrap('td_emscripten_execute', 'string', [
+        'string'
+      ]),
+      td_receive: this.TdModule.cwrap('td_emscripten_receive', 'string', []),
       td_set_verbosity: verbosity => {
         this.td_functions.td_execute(
-          0,
           JSON.stringify({
             '@type': 'setLogVerbosityLevel',
             new_verbosity_level: verbosity
           })
         );
       },
-      td_get_timeout: this.TdModule.cwrap('td_get_timeout', 'number', [])
+      td_get_timeout: this.TdModule.cwrap(
+        'td_emscripten_get_timeout',
+        'number',
+        []
+      )
     };
     //this.onFS(this.TdModule.FS);
     this.FS = this.TdModule.FS;
@@ -680,7 +645,7 @@ class TdClient {
       options.logVerbosityLevel = 2;
     }
     this.td_functions.td_set_verbosity(options.logVerbosityLevel);
-    this.client = this.td_functions.td_create();
+    this.client_id = this.td_functions.td_create();
 
     this.savingFiles = new Map();
     this.send({
@@ -731,14 +696,14 @@ class TdClient {
 
   prepareQuery(query) {
     if (query['@type'] === 'setTdlibParameters') {
-      query.parameters.database_directory = this.tdfs.dbFileSystem.root;
-      query.parameters.files_directory = this.tdfs.inboundFileSystem.root;
+      query.database_directory = this.tdfs.dbFileSystem.root;
+      query.files_directory = this.tdfs.inboundFileSystem.root;
 
       const useDb = this.useDatabase;
-      query.parameters.use_file_database = useDb;
-      query.parameters.use_chat_info_database = useDb;
-      query.parameters.use_message_database = useDb;
-      query.parameters.use_secret_chats = useDb;
+      query.use_file_database = useDb;
+      query.use_chat_info_database = useDb;
+      query.use_message_database = useDb;
+      query.use_secret_chats = useDb;
     }
     if (query['@type'] === 'getLanguagePackString') {
       query.language_pack_database_path =
@@ -774,8 +739,8 @@ class TdClient {
     try {
       //const file_size = this.FS.stat(query.path).size;
       const stream = this.FS.open(query.path, 'r');
-      const buf = new Uint8Array(query.size);
-      this.FS.read(stream, buf, 0, query.size, query.offset);
+      const buf = new Uint8Array(query.count);
+      this.FS.read(stream, buf, 0, query.count, query.offset);
       this.FS.close(stream);
       res = buf;
     } catch (e) {
@@ -843,13 +808,13 @@ class TdClient {
       return;
     }
     query = this.prepareQuery(query);
-    this.td_functions.td_send(this.client, JSON.stringify(query));
+    this.td_functions.td_send(this.client_id, JSON.stringify(query));
     this.scheduleReceiveSoon();
   }
 
   execute(query) {
     try {
-      const res = this.td_functions.td_execute(0, JSON.stringify(query));
+      const res = this.td_functions.td_execute(JSON.stringify(query));
       const response = JSON.parse(res);
       this.callback(response);
     } catch (error) {
@@ -863,7 +828,7 @@ class TdClient {
     }
     try {
       while (true) {
-        const msg = this.td_functions.td_receive(this.client);
+        const msg = this.td_functions.td_receive();
         if (!msg) {
           break;
         }
@@ -919,7 +884,7 @@ class TdClient {
   }
 
   async close(last_update) {
-    // close db and cancell all timers
+    // close db and cancel all timers
     this.isClosing = true;
     if (this.isStarted) {
       log.debug('close worker: start');
@@ -981,7 +946,7 @@ class TdClient {
   }
 
   prepareFile(file) {
-    const pid = file.remote.id;
+    const pid = file.remote.unique_id ? file.remote.unique_id : file.remote.id;
     if (!pid) {
       return file;
     }

@@ -1,17 +1,21 @@
 //
-// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2019
+// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2026
 //
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
 //
 #include "td/mtproto/TlsInit.h"
 
+#include "td/mtproto/ProxySecret.h"
+
 #include "td/utils/as.h"
 #include "td/utils/BigNum.h"
 #include "td/utils/common.h"
 #include "td/utils/crypto.h"
 #include "td/utils/logging.h"
+#include "td/utils/misc.h"
 #include "td/utils/Random.h"
+#include "td/utils/SliceBuilder.h"
 #include "td/utils/Span.h"
 #include "td/utils/Time.h"
 
@@ -36,13 +40,28 @@ void Grease::init(MutableSlice res) {
 class TlsHello {
  public:
   struct Op {
-    enum class Type { String, Random, Zero, Domain, Grease, Key, BeginScope, EndScope };
+    enum class Type {
+      String,
+      Random,
+      Zero,
+      Domain,
+      Grease,
+      Key,
+      MlKem768Key,
+      BeginScope,
+      EndScope,
+      Permutation,
+      RandomValue,
+      Padding
+    };
     Type type;
     int length;
     int seed;
-    std::string data;
+    string data;
+    vector<vector<Op>> parts;
+    vector<Op> value;
 
-    static Op string(Slice str) {
+    static Op str(Slice str) {
       Op res;
       res.type = Type::String;
       res.data = str.str();
@@ -86,45 +105,136 @@ class TlsHello {
       res.type = Type::Key;
       return res;
     }
+    static Op ml_kem_768_key() {
+      Op res;
+      res.type = Type::MlKem768Key;
+      return res;
+    }
+    static Op permutation(vector<vector<Op>> parts) {
+      Op res;
+      res.type = Type::Permutation;
+      res.parts = std::move(parts);
+      return res;
+    }
+    static Op random_value(vector<vector<Op>> parts) {
+      CHECK(!parts.empty());
+      Op res;
+      res.type = Type::RandomValue;
+      res.value = parts[Random::fast(0, static_cast<int>(parts.size() - 1))];
+      return res;
+    }
+    static Op ech_payload() {
+      Op res;
+      res.type = Type::Random;
+      res.length = Random::fast(0, 3) * 32 + 144;
+      return res;
+    }
+    static Op padding() {
+      Op res;
+      res.type = Type::Padding;
+      return res;
+    }
   };
 
   static const TlsHello &get_default() {
     static TlsHello result = [] {
       TlsHello res;
+#if TD_DARWIN
       res.ops_ = {
-          Op::string("\x16\x03\x01\x02\x00\x01\x00\x01\xfc\x03\x03"),
+          Op::str("\x16\x03\x01"),
+          Op::begin_scope(),
+          Op::str("\x01\x00"),
+          Op::begin_scope(),
+          Op::str("\x03\x03"),
           Op::zero(32),
-          Op::string("\x20"),
+          Op::str("\x20"),
           Op::random(32),
-          Op::string("\x00\x22"),
-          Op::grease(0),
-          Op::string("\x13\x01\x13\x02\x13\x03\xc0\x2b\xc0\x2f\xc0\x2c\xc0\x30\xcc\xa9\xcc\xa8\xc0\x13\xc0\x14\x00\x9c"
-                     "\x00\x9d\x00\x2f\x00\x35\x00\x0a\x01\x00\x01\x91"),
+          Op::random_value(
+              {vector<Op>{Op::str("\x00\x1c"), Op::grease(0),
+                          Op::str("\x13\x02\x13\x01\x13\x03\xc0\x2c\xc0\x30\xc0\x2b\xcc\xa9\xc0\x2f\xcc\xa8\xc0\x0a\xc0"
+                                  "\x09\xc0\x14\xc0\x13")},
+               vector<Op>{Op::str("\x00\x2a"), Op::grease(0),
+                          Op::str("\x13\x02\x13\x03\x13\x01\xc0\x2c\xc0\x2b\xcc\xa9\xc0\x30\xc0\x2f\xcc\xa8\xc0\x0a\xc0"
+                                  "\x09\xc0\x14\xc0\x13\x00\x9d\x00\x9c\x00\x35\x00\x2f\xc0\x08\xc0\x12\x00\x0a")}}),
+          Op::str("\x01\x00"),
+          Op::begin_scope(),
           Op::grease(2),
-          Op::string("\x00\x00\x00\x00"),
+          Op::str("\x00\x00\x00\x00"),
           Op::begin_scope(),
           Op::begin_scope(),
-          Op::string("\x00"),
+          Op::str("\x00"),
           Op::begin_scope(),
           Op::domain(),
           Op::end_scope(),
           Op::end_scope(),
           Op::end_scope(),
-          Op::string("\x00\x17\x00\x00\xff\x01\x00\x01\x00\x00\x0a\x00\x0a\x00\x08"),
+          Op::str("\x00\x17\x00\x00\xff\x01\x00\x01\x00\x00\x0a\x00\x0e\x00\x0c"),
           Op::grease(4),
-          Op::string(
-              "\x00\x1d\x00\x17\x00\x18\x00\x0b\x00\x02\x01\x00\x00\x23\x00\x00\x00\x10\x00\x0e\x00\x0c\x02\x68\x32\x08"
-              "\x68\x74\x74\x70\x2f\x31\x2e\x31\x00\x05\x00\x05\x01\x00\x00\x00\x00\x00\x0d\x00\x14\x00\x12\x04\x03\x08"
-              "\x04\x04\x01\x05\x03\x08\x05\x05\x01\x08\x06\x06\x01\x02\x01\x00\x12\x00\x00\x00\x33\x00\x2b\x00\x29"),
+          Op::str("\x11\xec\x00\x1d\x00\x17\x00\x18\x00\x19\x00\x0b\x00\x02\x01\x00"),
+          Op::random_value(
+              {vector<Op>{Op::str("\x00\x10\x00\x0b\x00\x09\x08\x68\x74\x74\x70\x2f\x31\x2e\x31")},
+               vector<Op>{Op::str("\x00\x10\x00\x0e\x00\x0c\x02\x68\x32\x08\x68\x74\x74\x70\x2f\x31\x2e\x31")}}),
+          Op::str("\x00\x05\x00\x05\x01\x00\x00\x00\x00\x00\x0d\x00\x16\x00\x14\x04\x03\x08\x04\x04\x01\x05\x03\x08\x05"
+                  "\x08\x05\x05\x01\x08\x06\x06\x01\x02\x01\x00\x12\x00\x00\x00\x33\x04\xef\x04\xed"),
           Op::grease(4),
-          Op::string("\x00\x01\x00\x00\x1d\x00\x20"),
+          Op::str("\x00\x01\x00\x11\xec\x04\xc0"),
+          Op::ml_kem_768_key(),
           Op::key(),
-          Op::string("\x00\x2d\x00\x02\x01\x01\x00\x2b\x00\x0b\x0a"),
+          Op::str("\x00\x1d\x00\x20"),
+          Op::key(),
+          Op::str("\x00\x2d\x00\x02\x01\x01\x00\x2b\x00\x07\x06"),
           Op::grease(6),
-          Op::string("\x03\x04\x03\x03\x03\x02\x03\x01\x00\x1b\x00\x03\x02\x00\x02"),
+          Op::str("\x03\x04\x03\x03\x00\x1b\x00\x03\x02\x00\x01"),
           Op::grease(3),
-          Op::string("\x00\x01\x00\x00\x15")};
-      res.grease_size_ = 7;
+          Op::str("\x00\x01\x00"),
+          Op::end_scope(),
+          Op::end_scope(),
+          Op::end_scope()};
+#else
+      res.ops_ = {
+          Op::str("\x16\x03\x01"),
+          Op::begin_scope(),
+          Op::str("\x01\x00"),
+          Op::begin_scope(),
+          Op::str("\x03\x03"),
+          Op::zero(32),
+          Op::str("\x20"),
+          Op::random(32),
+          Op::str("\x00\x20"),
+          Op::grease(0),
+          Op::str("\x13\x01\x13\x02\x13\x03\xc0\x2b\xc0\x2f\xc0\x2c\xc0\x30\xcc\xa9\xcc\xa8\xc0\x13\xc0\x14\x00\x9c\x00"
+                  "\x9d\x00\x2f\x00\x35\x01\x00"),
+          Op::begin_scope(),
+          Op::grease(2),
+          Op::str("\x00\x00"),
+          Op::permutation(
+              {vector<Op>{Op::str("\x00\x00"), Op::begin_scope(), Op::begin_scope(), Op::str("\x00"), Op::begin_scope(),
+                          Op::domain(), Op::end_scope(), Op::end_scope(), Op::end_scope()},
+               vector<Op>{Op::str("\x00\x05\x00\x05\x01\x00\x00\x00\x00")},
+               vector<Op>{Op::str("\x00\x0a\x00\x0c\x00\x0a"), Op::grease(4),
+                          Op::str("\x11\xec\x00\x1d\x00\x17\x00\x18")},
+               vector<Op>{Op::str("\x00\x0b\x00\x02\x01\x00")},
+               vector<Op>{Op::str("\x00\x0d\x00\x18\x00\x16\x09\x04\x09\x05\x09\x06\x04\x03\x08\x04\x04\x01\x05\x03\x08"
+                                  "\x05\x05\x01\x08\x06\x06\x01")},
+               vector<Op>{Op::str("\x00\x10\x00\x0e\x00\x0c\x02\x68\x32\x08\x68\x74\x74\x70\x2f\x31\x2e\x31")},
+               vector<Op>{Op::str("\x00\x12\x00\x00")}, vector<Op>{Op::str("\x00\x17\x00\x00")},
+               vector<Op>{Op::str("\x00\x1b\x00\x03\x02\x00\x02")}, vector<Op>{Op::str("\x00\x23\x00\x00")},
+               vector<Op>{Op::str("\x00\x2b\x00\x07\x06"), Op::grease(6), Op::str("\x03\x04\x03\x03")},
+               vector<Op>{Op::str("\x00\x2d\x00\x02\x01\x01")},
+               vector<Op>{Op::str("\x00\x33\x04\xef\x04\xed"), Op::grease(4), Op::str("\x00\x01\x00\x11\xec\x04\xc0"),
+                          Op::ml_kem_768_key(), Op::key(), Op::str("\x00\x1d\x00\x20"), Op::key()},
+               vector<Op>{Op::str("\x44\xcd\x00\x05\x00\x03\x02\x68\x32")},
+               vector<Op>{Op::str("\xfe\x0d"), Op::begin_scope(), Op::str("\x00\x00\x01\x00\x01"), Op::random(1),
+                          Op::str("\x00\x20"), Op::key(), Op::begin_scope(), Op::ech_payload(), Op::end_scope(),
+                          Op::end_scope()},
+               vector<Op>{Op::str("\xff\x01\x00\x01\x00")}}),
+          Op::grease(3),
+          Op::str("\x00\x01\x00"),
+          Op::padding(),
+          Op::end_scope(),
+          Op::end_scope(),
+          Op::end_scope()};
+#endif
       return res;
     }();
     return result;
@@ -140,12 +250,12 @@ class TlsHello {
 
  private:
   std::vector<Op> ops_;
-  size_t grease_size_;
+  size_t grease_size_ = 7;
 };
 
 class TlsHelloContext {
  public:
-  TlsHelloContext(size_t grease_size, std::string domain) : grease_(grease_size, '\0'), domain_(std::move(domain)) {
+  TlsHelloContext(size_t grease_size, string domain) : grease_(grease_size, '\0'), domain_(std::move(domain)) {
     Grease::init(grease_);
   }
 
@@ -157,12 +267,12 @@ class TlsHelloContext {
     return grease_.size();
   }
   Slice get_domain() const {
-    return domain_;
+    return Slice(domain_).substr(0, ProxySecret::MAX_DOMAIN_LENGTH);
   }
 
  private:
-  std::string grease_;
-  std::string domain_;
+  string grease_;
+  string domain_;
 };
 
 class TlsHelloCalcLength {
@@ -177,13 +287,13 @@ class TlsHelloCalcLength {
         size_ += op.data.size();
         break;
       case Type::Random:
-        if (op.length <= 0 || op.length > 1024) {
+        if (op.length <= 0 || op.length > 2048) {
           return on_error(Status::Error("Invalid random length"));
         }
         size_ += op.length;
         break;
       case Type::Zero:
-        if (op.length <= 0 || op.length > 1024) {
+        if (op.length <= 0 || op.length > 2048) {
           return on_error(Status::Error("Invalid zero length"));
         }
         size_ += op.length;
@@ -202,6 +312,9 @@ class TlsHelloCalcLength {
       case Type::Key:
         size_ += 32;
         break;
+      case Type::MlKem768Key:
+        size_ += 1184;
+        break;
       case Type::BeginScope:
         size_ += 2;
         scope_offset_.push_back(size_);
@@ -219,27 +332,42 @@ class TlsHelloCalcLength {
         }
         break;
       }
+      case Type::Permutation:
+        for (const auto &part : op.parts) {
+          for (auto &nested_op : part) {
+            do_op(nested_op, context);
+          }
+        }
+        break;
+      case Type::RandomValue:
+        for (auto &nested_op : op.value) {
+          do_op(nested_op, context);
+        }
+        break;
+      case Type::Padding:
+        if (size_ < 513) {
+          size_ = 517;
+        }
+        break;
       default:
         UNREACHABLE();
     }
   }
 
+  size_t get_length() const {
+    return size_;
+  }
+
   Result<size_t> finish() {
-    if (size_ > 515) {
-      on_error(Status::Error("Too long for zero padding"));
+    if (status_.is_error()) {
+      return std::move(status_);
+    }
+    if (!scope_offset_.empty()) {
+      return Status::Error("Unbalanced scopes");
     }
     if (size_ < 11 + 32) {
-      on_error(Status::Error("Too small for hash"));
+      return Status::Error("Too small for hash");
     }
-    int zero_pad = 515 - static_cast<int>(size_);
-    using Op = TlsHello::Op;
-    do_op(Op::begin_scope(), nullptr);
-    do_op(Op::zero(zero_pad), nullptr);
-    do_op(Op::end_scope(), nullptr);
-    if (!scope_offset_.empty()) {
-      on_error(Status::Error("Unbalanced scopes"));
-    }
-    TRY_STATUS(std::move(status_));
     return size_;
   }
 
@@ -282,7 +410,7 @@ class TlsHelloStore {
         break;
       }
       case Type::Grease: {
-        CHECK(context)
+        CHECK(context);
         auto grease = context->get_grease(op.seed);
         dest_[0] = grease;
         dest_[1] = grease;
@@ -310,6 +438,17 @@ class TlsHelloStore {
         dest_.remove_prefix(32);
         break;
       }
+      case Type::MlKem768Key:
+        for (size_t i = 0; i < 384; i++) {
+          auto a = Random::secure_uint32() % 3329;
+          auto b = Random::secure_uint32() % 3329;
+          dest_[0] = static_cast<char>(a & 255);
+          dest_[1] = static_cast<char>((a >> 8) + ((b & 15) << 4));
+          dest_[2] = static_cast<char>(b >> 4);
+          dest_.remove_prefix(3);
+        }
+        do_op(TlsHello::Op::random(32), nullptr);
+        break;
       case Type::BeginScope:
         scope_offset_.push_back(get_offset());
         dest_.remove_prefix(2);
@@ -325,29 +464,62 @@ class TlsHelloStore {
         data_[begin_offset + 1] = static_cast<char>(size & 0xff);
         break;
       }
+      case Type::Permutation: {
+        vector<string> parts;
+        for (const auto &part : op.parts) {
+          TlsHelloCalcLength calc_length;
+          for (auto &nested_op : part) {
+            calc_length.do_op(nested_op, context);
+          }
+          auto length = calc_length.get_length();
+          string data(length, '\0');
+          TlsHelloStore storer(data);
+          for (auto &nested_op : part) {
+            storer.do_op(nested_op, context);
+          }
+          CHECK(storer.get_offset() == data.size());
+          parts.push_back(std::move(data));
+        }
+        Random::shuffle(parts);
+        for (auto &part : parts) {
+          dest_.copy_from(part);
+          dest_.remove_prefix(part.size());
+        }
+        break;
+      }
+      case Type::RandomValue:
+        for (auto &nested_op : op.value) {
+          do_op(nested_op, context);
+        }
+        break;
+      case Type::Padding: {
+        auto size = 513 - static_cast<int>(get_offset());
+        if (size > 0) {
+          do_op(TlsHello::Op::str("\x00\x15"), nullptr);
+          do_op(TlsHello::Op::begin_scope(), nullptr);
+          do_op(TlsHello::Op::zero(size), nullptr);
+          do_op(TlsHello::Op::end_scope(), nullptr);
+        }
+        break;
+      }
       default:
         UNREACHABLE();
     }
   }
 
   void finish(Slice secret, int32 unix_time) {
-    int zero_pad = 515 - static_cast<int>(get_offset());
-    using Op = TlsHello::Op;
-    do_op(Op::begin_scope(), nullptr);
-    do_op(Op::zero(zero_pad), nullptr);
-    do_op(Op::end_scope(), nullptr);
-
     auto hash_dest = data_.substr(11, 32);
     hmac_sha256(secret, data_, hash_dest);
     int32 old = as<int32>(hash_dest.substr(28).data());
     as<int32>(hash_dest.substr(28).data()) = old ^ unix_time;
     CHECK(dest_.empty());
+    // LOG(ERROR) << hex_encode(data_);
   }
 
  private:
   MutableSlice data_;
   MutableSlice dest_;
-  std::vector<size_t> scope_offset_;
+  vector<size_t> scope_offset_;
 
   static BigNum get_y2(BigNum &x, const BigNum &mod, BigNumContext &big_num_context) {
     // returns y = x^3 + 486662 * x^2 + x
@@ -373,7 +545,12 @@ class TlsHelloStore {
     BigNum::mod_sub(numerator, numerator, one, mod, big_num_context);
     BigNum::mod_mul(numerator, numerator, numerator, mod, big_num_context);
 
-    BigNum::mod_inverse(denominator, denominator, mod, big_num_context);
+    auto r_inverse = BigNum::mod_inverse(denominator, mod, big_num_context);
+    if (r_inverse.is_error()) {
+      LOG(ERROR) << r_inverse.error();
+    } else {
+      denominator = r_inverse.move_as_ok();
+    }
     BigNum::mod_mul(numerator, numerator, denominator, mod, big_num_context);
     return numerator;
   }
@@ -398,7 +575,7 @@ class TlsHelloStore {
 
 class TlsObfusaction {
  public:
-  static std::string generate_header(std::string domain, Slice secret, int32 unix_time) {
+  static string generate_header(string domain, Slice secret, int32 unix_time) {
     CHECK(!domain.empty());
     CHECK(secret.size() == 16);
 
@@ -409,7 +586,7 @@ class TlsObfusaction {
       calc_length.do_op(op, &context);
     }
     auto length = calc_length.finish().move_as_ok();
-    std::string data(length, '\0');
+    string data(length, '\0');
     TlsHelloStore storer(data);
     for (auto &op : hello.get_ops()) {
       storer.do_op(op, &context);
@@ -428,15 +605,22 @@ void TlsInit::send_hello() {
 }
 
 Status TlsInit::wait_hello_response() {
+  /*
+  auto it2 = fd_.input_buffer().clone();
+  string buffer(it2.size(), '\0');
+  it2.advance(it2.size(), buffer);
+  LOG(ERROR) << hex_encode(buffer);
+  */
+
   auto it = fd_.input_buffer().clone();
-  for (auto first : {Slice("\x16\x03\x03"), Slice("\x14\x03\x03\x00\x01\x01\x17\x03\x03")}) {
-    if (it.size() < first.size() + 2) {
+  for (auto prefix : {Slice("\x16\x03\x03"), Slice("\x14\x03\x03\x00\x01\x01\x17\x03\x03")}) {
+    if (it.size() < prefix.size() + 2) {
       return Status::OK();
     }
 
-    std::string got_first(first.size(), '\0');
-    it.advance(first.size(), got_first);
-    if (first != got_first) {
+    string response_prefix(prefix.size(), '\0');
+    it.advance(prefix.size(), response_prefix);
+    if (prefix != response_prefix) {
       return Status::Error("First part of response to hello is invalid");
     }
 
@@ -450,13 +634,13 @@ Status TlsInit::wait_hello_response() {
   }
 
   auto response = fd_.input_buffer().cut_head(it.begin().clone()).move_as_buffer_slice();
-  auto response_rand_slice = response.as_slice().substr(11, 32);
+  auto response_rand_slice = response.as_mutable_slice().substr(11, 32);
   auto response_rand = response_rand_slice.str();
   std::fill(response_rand_slice.begin(), response_rand_slice.end(), '\0');
-  std::string hash_dest(32, '\0');
+  string hash_dest(32, '\0');
   hmac_sha256(password_, PSLICE() << hello_rand_ << response.as_slice(), hash_dest);
   if (hash_dest != response_rand) {
-    return td::Status::Error("Response hash mismatch");
+    return Status::Error("Response hash mismatch");
   }
 
   stop();

@@ -1,13 +1,13 @@
 //
-// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2019
+// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2026
 //
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
 //
 #pragma once
 
-#include "tl_core.h"
-#include "tl_simple_parser.h"
+#include "td/tl/tl_core.h"
+#include "td/tl/tl_simple_parser.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -64,7 +64,7 @@ class tl_config_parser {
   tl_tree *read_type_expr(int *var_count);
   tl_tree *read_nat_expr(int *var_count);
   tl_tree *read_expr(int *var_count);
-  std::vector<arg> read_args_list(int *var_count);
+  std::vector<arg> read_args(int *var_count);
 
   tl_combinator *read_combinator();
   tl_type *read_type();

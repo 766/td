@@ -1,5 +1,5 @@
 //
-// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2019
+// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2026
 //
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
@@ -15,8 +15,12 @@ namespace mtproto {
 
 class ProxySecret {
  public:
-  static Result<ProxySecret> from_link(Slice encoded_secret);
-  static Result<ProxySecret> from_binary(Slice raw_unchecked_secret);
+  static constexpr size_t MAX_DOMAIN_LENGTH = 182;  // must be small enough to not overflow TLS-hello length
+
+  static Result<ProxySecret> from_link(Slice encoded_secret, bool truncate_if_needed = false);
+
+  static Result<ProxySecret> from_binary(Slice raw_unchecked_secret, bool truncate_if_needed = false);
+
   static ProxySecret from_raw(Slice raw_secret) {
     ProxySecret result;
     result.secret_ = raw_secret.str();
@@ -28,9 +32,9 @@ class ProxySecret {
   }
 
   Slice get_proxy_secret() const {
-    auto proxy_secret = Slice(secret_).truncate(17);
-    if (proxy_secret.size() == 17) {
-      proxy_secret.remove_prefix(1);
+    Slice proxy_secret(secret_);
+    if (proxy_secret.size() >= 17) {
+      return proxy_secret.substr(1, 16);
     }
     return proxy_secret;
   }

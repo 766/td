@@ -1,5 +1,5 @@
 //
-// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2019
+// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2026
 //
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
@@ -13,7 +13,6 @@
 
 #include <cstddef>
 #include <cstdint>
-#include <memory>
 #include <string>
 #include <type_traits>
 #include <utility>
@@ -88,9 +87,7 @@ class TlObject {
   virtual ~TlObject() = default;
 };
 
-/**
- * A smart wrapper to store a pointer to a TL-object.
- */
+/// @cond UNDOCUMENTED
 namespace tl {
 
 template <class T>
@@ -100,8 +97,8 @@ class unique_ptr {
   using element_type = T;
 
   unique_ptr() noexcept = default;
-  unique_ptr(const unique_ptr &other) = delete;
-  unique_ptr &operator=(const unique_ptr &other) = delete;
+  unique_ptr(const unique_ptr &) = delete;
+  unique_ptr &operator=(const unique_ptr &) = delete;
   unique_ptr(unique_ptr &&other) noexcept : ptr_(other.release()) {
   }
   unique_ptr &operator=(unique_ptr &&other) noexcept {
@@ -116,15 +113,16 @@ class unique_ptr {
   }
   explicit unique_ptr(T *ptr) noexcept : ptr_(ptr) {
   }
-  template <class S, class = std::enable_if_t<std::is_base_of<T, S>::value>>
+  template <class S, class = typename std::enable_if<std::is_base_of<T, S>::value>::type>
   unique_ptr(unique_ptr<S> &&other) noexcept : ptr_(static_cast<S *>(other.release())) {
   }
-  template <class S, class = std::enable_if_t<std::is_base_of<T, S>::value>>
+  template <class S, class = typename std::enable_if<std::is_base_of<T, S>::value>::type>
   unique_ptr &operator=(unique_ptr<S> &&other) noexcept {
     reset(static_cast<T *>(other.release()));
     return *this;
   }
   void reset(T *new_ptr = nullptr) noexcept {
+    static_assert(sizeof(T) > 0, "Can't destroy unique_ptr with incomplete type");
     delete ptr_;
     ptr_ = new_ptr;
   }
@@ -177,6 +175,11 @@ bool operator!=(const unique_ptr<T> &p, std::nullptr_t) {
 }
 
 }  // namespace tl
+/// @endcond
+
+/**
+ * A smart wrapper to store a pointer to a TL-object.
+ */
 template <class Type>
 using tl_object_ptr = tl::unique_ptr<Type>;
 
@@ -184,11 +187,11 @@ using tl_object_ptr = tl::unique_ptr<Type>;
  * A function to create a dynamically allocated TL-object. Can be treated as an analogue of std::make_unique.
  * Usage example:
  * \code
- * auto get_authorization_state_request = td::make_tl_object<td::td_api::getAuthorizationState>();
+ * auto get_me_request = td::make_tl_object<td::td_api::getMe>();
  * auto message_text = td::make_tl_object<td::td_api::formattedText>("Hello, world!!!",
- *                     std::vector<td::tl_object_ptr<td::td_api::textEntities>>());
- * auto send_message_request = td::make_tl_object<td::td_api::sendMessage>(chat_id, 0, false, false, nullptr,
- *      td::make_tl_object<td::td_api::inputMessageText>(std::move(message_text), false, true));
+ *                     td::td_api::array<td::tl_object_ptr<td::td_api::textEntity>>());
+ * auto send_message_request = td::make_tl_object<td::td_api::sendMessage>(chat_id, nullptr, nullptr, nullptr, nullptr,
+ *      td::make_tl_object<td::td_api::inputMessageText>(std::move(message_text), nullptr, true));
  * \endcode
  *
  * \tparam Type Type of the TL-object to construct.
@@ -196,7 +199,7 @@ using tl_object_ptr = tl::unique_ptr<Type>;
  * \return Wrapped pointer to the created TL-object.
  */
 template <class Type, class... Args>
-tl_object_ptr<Type> make_tl_object(Args &&... args) {
+tl_object_ptr<Type> make_tl_object(Args &&...args) {
   return tl_object_ptr<Type>(new Type(std::forward<Args>(args)...));
 }
 
@@ -240,8 +243,8 @@ tl_object_ptr<Type> make_tl_object(Args &&... args) {
  * }
  * \endcode
  *
- * \tparam ToT Type of a TL-object to move to.
- * \tparam FromT Type of a TL-object to move from, this is auto-deduced.
+ * \tparam ToT Type of TL-object to move to.
+ * \tparam FromT Type of TL-object to move from, this is auto-deduced.
  * \param[in] from Wrapped pointer to a TL-object.
  */
 template <class ToT, class FromT>

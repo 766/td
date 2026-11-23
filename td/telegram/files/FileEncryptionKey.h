@@ -1,5 +1,5 @@
 //
-// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2019
+// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2026
 //
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
@@ -86,13 +86,14 @@ struct FileEncryptionKey {
     }
   }
 
+  friend bool operator==(const FileEncryptionKey &lhs, const FileEncryptionKey &rhs) {
+    return lhs.key_iv_ == rhs.key_iv_;
+  }
+
+ private:
   string key_iv_;  // TODO wrong alignment is possible
   Type type_ = Type::None;
 };
-
-inline bool operator==(const FileEncryptionKey &lhs, const FileEncryptionKey &rhs) {
-  return lhs.key_iv_ == rhs.key_iv_;
-}
 
 inline bool operator!=(const FileEncryptionKey &lhs, const FileEncryptionKey &rhs) {
   return !(lhs == rhs);

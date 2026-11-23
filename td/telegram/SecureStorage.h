@@ -1,5 +1,5 @@
 //
-// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2019
+// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2026
 //
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
@@ -9,7 +9,6 @@
 #include "td/utils/buffer.h"
 #include "td/utils/common.h"
 #include "td/utils/crypto.h"
-#include "td/utils/port/FileFd.h"
 #include "td/utils/Slice.h"
 #include "td/utils/Status.h"
 #include "td/utils/UInt.h"
@@ -55,7 +54,7 @@ class ValueHash {
   }
   static Result<ValueHash> create(Slice data);
   Slice as_slice() const {
-    return td::as_slice(hash_);
+    return ::td::as_slice(hash_);
   }
 
  private:
@@ -75,33 +74,21 @@ class DataView {
   virtual ~DataView() = default;
 };
 
-class FileDataView : public DataView {
- public:
-  FileDataView(FileFd &fd, int64 size);
-
-  int64 size() const override;
-  Result<BufferSlice> pread(int64 offset, int64 size) const override;
-
- private:
-  FileFd &fd_;
-  int64 size_;
-};
-
-class BufferSliceDataView : public DataView {
+class BufferSliceDataView final : public DataView {
  public:
   explicit BufferSliceDataView(BufferSlice buffer_slice);
-  int64 size() const override;
-  Result<BufferSlice> pread(int64 offset, int64 size) const override;
+  int64 size() const final;
+  Result<BufferSlice> pread(int64 offset, int64 size) const final;
 
  private:
   BufferSlice buffer_slice_;
 };
 
-class ConcatDataView : public DataView {
+class ConcatDataView final : public DataView {
  public:
   ConcatDataView(const DataView &left, const DataView &right);
-  int64 size() const override;
-  Result<BufferSlice> pread(int64 offset, int64 size) const override;
+  int64 size() const final;
+  Result<BufferSlice> pread(int64 offset, int64 size) const final;
 
  private:
   const DataView &left_;
@@ -174,11 +161,11 @@ class Decryptor {
 };
 
 // Encryption
-class Encryptor : public DataView {
+class Encryptor final : public DataView {
  public:
   Encryptor(AesCbcState aes_cbc_state, const DataView &data_view);
-  int64 size() const override;
-  Result<BufferSlice> pread(int64 offset, int64 size) const override;
+  int64 size() const final;
+  Result<BufferSlice> pread(int64 offset, int64 size) const final;
 
  private:
   mutable AesCbcState aes_cbc_state_;
@@ -195,16 +182,14 @@ struct EncryptedValue {
   BufferSlice data;
   ValueHash hash;
 };
-struct EncryptedFile {
-  std::string path;
-  ValueHash hash;
-};
 
 Result<EncryptedValue> encrypt_value(const Secret &secret, Slice data);
-Result<ValueHash> encrypt_file(const Secret &secret, std::string src, std::string dest);
 
 Result<BufferSlice> decrypt_value(const Secret &secret, const ValueHash &hash, Slice data);
-Status decrypt_file(const Secret &secret, const ValueHash &hash, std::string src, std::string dest);
+
+Result<ValueHash> encrypt_file(const Secret &secret, const string &src, const string &dest);
+
+Status decrypt_file(const Secret &secret, const ValueHash &hash, const string &src, const string &dest);
 
 }  // namespace secure_storage
 }  // namespace td

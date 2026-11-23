@@ -1,5 +1,5 @@
 //
-// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2019
+// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2026
 //
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
@@ -7,9 +7,11 @@
 #include "td/tl/tl_jni_object.h"
 
 #include "td/utils/common.h"
+#include "td/utils/ExitGuard.h"
 #include "td/utils/logging.h"
 #include "td/utils/misc.h"
 #include "td/utils/Slice.h"
+#include "td/utils/SliceBuilder.h"
 
 #include <memory>
 
@@ -36,6 +38,10 @@ jmethodID DoubleGetValueMethodID;
 static void fatal_error(JNIEnv *env, CSlice error) {
   LOG(ERROR) << error;
   env->FatalError(error.c_str());
+}
+
+void set_fatal_error(JNIEnv *env, const std::string &error) {
+  fatal_error(env, error);
 }
 
 jclass get_jclass(JNIEnv *env, const char *class_name) {
@@ -70,6 +76,14 @@ jfieldID get_field_id(JNIEnv *env, jclass clazz, const char *name, const char *s
   return res;
 }
 
+jfieldID get_static_field_id(JNIEnv *env, jclass clazz, const char *name, const char *signature) {
+  jfieldID res = env->GetStaticFieldID(clazz, name, signature);
+  if (!res) {
+    fatal_error(env, PSLICE() << "Can't find static field [" << name << "] with signature [" << signature << "]");
+  }
+  return res;
+}
+
 void register_native_method(JNIEnv *env, jclass clazz, std::string name, std::string signature, void *function_ptr) {
   JNINativeMethod native_method{&name[0], &signature[0], function_ptr};
   if (env->RegisterNatives(clazz, &native_method, 1) != 0) {
@@ -79,13 +93,16 @@ void register_native_method(JNIEnv *env, jclass clazz, std::string name, std::st
 
 std::unique_ptr<JNIEnv, JvmThreadDetacher> get_jni_env(JavaVM *java_vm, jint jni_version) {
   JNIEnv *env = nullptr;
-  if (java_vm->GetEnv(reinterpret_cast<void **>(&env), jni_version) == JNI_EDETACHED) {
+  if (!ExitGuard::is_exited() && java_vm->GetEnv(reinterpret_cast<void **>(&env), jni_version) == JNI_EDETACHED) {
 #ifdef JDK1_2  // if not Android JNI
     auto p_env = reinterpret_cast<void **>(&env);
 #else
     auto p_env = &env;
 #endif
-    java_vm->AttachCurrentThread(p_env, nullptr);
+    if (java_vm->AttachCurrentThread(p_env, nullptr) != JNI_OK) {
+      java_vm = nullptr;
+      env = nullptr;
+    }
   } else {
     java_vm = nullptr;
   }
@@ -116,10 +133,10 @@ void init_vars(JNIEnv *env, const char *td_api_java_package) {
 static size_t get_utf8_from_utf16_length(const jchar *p, jsize len) {
   size_t result = 0;
   for (jsize i = 0; i < len; i++) {
-    unsigned int cur = p[i];
+    uint32 cur = p[i];
     if ((cur & 0xF800) == 0xD800) {
       if (i < len) {
-        unsigned int next = p[++i];
+        uint32 next = p[++i];
         if ((next & 0xFC00) == 0xDC00 && (cur & 0x400) == 0) {
           result += 4;
           continue;
@@ -136,8 +153,8 @@ static size_t get_utf8_from_utf16_length(const jchar *p, jsize len) {
 
 static void utf16_to_utf8(const jchar *p, jsize len, char *res) {
   for (jsize i = 0; i < len; i++) {
-    unsigned int cur = p[i];
-    // TODO conversion unsigned int -> signed char is implementation defined
+    uint32 cur = p[i];
+    // TODO conversion uint32 -> signed char is implementation defined
     if (cur <= 0x7f) {
       *res++ = static_cast<char>(cur);
     } else if (cur <= 0x7ff) {
@@ -149,8 +166,8 @@ static void utf16_to_utf8(const jchar *p, jsize len, char *res) {
       *res++ = static_cast<char>(0x80 | (cur & 0x3f));
     } else {
       // correctness is already checked
-      unsigned int next = p[++i];
-      unsigned int val = ((cur - 0xD800) << 10) + next - 0xDC00 + 0x10000;
+      uint32 next = p[++i];
+      uint32 val = ((cur - 0xD800) << 10) + next - 0xDC00 + 0x10000;
 
       *res++ = static_cast<char>(0xf0 | (val >> 18));
       *res++ = static_cast<char>(0x80 | ((val >> 12) & 0x3f));
@@ -173,14 +190,14 @@ static jsize get_utf16_from_utf8_length(const char *p, size_t len, jsize *surrog
 static void utf8_to_utf16(const char *p, size_t len, jchar *res) {
   // UTF-8 correctness is supposed
   for (size_t i = 0; i < len;) {
-    unsigned int a = static_cast<unsigned char>(p[i++]);
+    uint32 a = static_cast<unsigned char>(p[i++]);
     if (a >= 0x80) {
-      unsigned int b = static_cast<unsigned char>(p[i++]);
+      uint32 b = static_cast<unsigned char>(p[i++]);
       if (a >= 0xe0) {
-        unsigned int c = static_cast<unsigned char>(p[i++]);
+        uint32 c = static_cast<unsigned char>(p[i++]);
         if (a >= 0xf0) {
-          unsigned int d = static_cast<unsigned char>(p[i++]);
-          unsigned int val = ((a & 0x07) << 18) + ((b & 0x3f) << 12) + ((c & 0x3f) << 6) + (d & 0x3f) - 0x10000;
+          uint32 d = static_cast<unsigned char>(p[i++]);
+          uint32 val = ((a & 0x07) << 18) + ((b & 0x3f) << 12) + ((c & 0x3f) << 6) + (d & 0x3f) - 0x10000;
           *res++ = static_cast<jchar>(0xD800 + (val >> 10));
           *res++ = static_cast<jchar>(0xDC00 + (val & 0x3ff));
         } else {
@@ -206,9 +223,20 @@ std::string fetch_string(JNIEnv *env, jobject o, jfieldID id) {
   return res;
 }
 
+std::string fetch_static_string(JNIEnv *env, jclass clazz, jfieldID id) {
+  jstring s = (jstring)env->GetStaticObjectField(clazz, id);
+  if (s == nullptr) {
+    // treat null as an empty string
+    return std::string();
+  }
+  std::string res = from_jstring(env, s);
+  env->DeleteLocalRef(s);
+  return res;
+}
+
 std::string from_jstring(JNIEnv *env, jstring s) {
   if (!s) {
-    return "";
+    return std::string();
   }
   jsize s_len = env->GetStringLength(s);
   const jchar *p = env->GetStringChars(s, nullptr);
@@ -259,7 +287,7 @@ std::string from_bytes(JNIEnv *env, jbyteArray arr) {
 
 jbyteArray to_bytes(JNIEnv *env, const std::string &b) {
   static_assert(sizeof(char) == sizeof(jbyte), "Mismatched jbyte size");
-  jsize length = narrow_cast<jsize>(b.size());
+  auto length = narrow_cast<jsize>(b.size());
   jbyteArray arr = env->NewByteArray(length);
   if (arr != nullptr && length != 0) {
     env->SetByteArrayRegion(arr, 0, length, reinterpret_cast<const jbyte *>(b.data()));
@@ -269,7 +297,7 @@ jbyteArray to_bytes(JNIEnv *env, const std::string &b) {
 
 jintArray store_vector(JNIEnv *env, const std::vector<std::int32_t> &v) {
   static_assert(sizeof(std::int32_t) == sizeof(jint), "Mismatched jint size");
-  jsize length = narrow_cast<jsize>(v.size());
+  auto length = narrow_cast<jsize>(v.size());
   jintArray arr = env->NewIntArray(length);
   if (arr != nullptr && length != 0) {
     env->SetIntArrayRegion(arr, 0, length, reinterpret_cast<const jint *>(&v[0]));
@@ -279,7 +307,7 @@ jintArray store_vector(JNIEnv *env, const std::vector<std::int32_t> &v) {
 
 jlongArray store_vector(JNIEnv *env, const std::vector<std::int64_t> &v) {
   static_assert(sizeof(std::int64_t) == sizeof(jlong), "Mismatched jlong size");
-  jsize length = narrow_cast<jsize>(v.size());
+  auto length = narrow_cast<jsize>(v.size());
   jlongArray arr = env->NewLongArray(length);
   if (arr != nullptr && length != 0) {
     env->SetLongArrayRegion(arr, 0, length, reinterpret_cast<const jlong *>(&v[0]));
@@ -289,7 +317,7 @@ jlongArray store_vector(JNIEnv *env, const std::vector<std::int64_t> &v) {
 
 jdoubleArray store_vector(JNIEnv *env, const std::vector<double> &v) {
   static_assert(sizeof(double) == sizeof(jdouble), "Mismatched jdouble size");
-  jsize length = narrow_cast<jsize>(v.size());
+  auto length = narrow_cast<jsize>(v.size());
   jdoubleArray arr = env->NewDoubleArray(length);
   if (arr != nullptr && length != 0) {
     env->SetDoubleArrayRegion(arr, 0, length, reinterpret_cast<const jdouble *>(&v[0]));
@@ -298,7 +326,7 @@ jdoubleArray store_vector(JNIEnv *env, const std::vector<double> &v) {
 }
 
 jobjectArray store_vector(JNIEnv *env, const std::vector<std::string> &v) {
-  jsize length = narrow_cast<jsize>(v.size());
+  auto length = narrow_cast<jsize>(v.size());
   jobjectArray arr = env->NewObjectArray(length, StringClass, 0);
   if (arr != nullptr) {
     for (jsize i = 0; i < length; i++) {

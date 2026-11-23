@@ -1,5 +1,5 @@
 //
-// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2019
+// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2026
 //
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
@@ -9,6 +9,7 @@
 #include "td/utils/format.h"
 #include "td/utils/logging.h"
 #include "td/utils/misc.h"
+#include "td/utils/port/config.h"
 #include "td/utils/port/detail/Iocp.h"
 #include "td/utils/port/IPAddress.h"
 #include "td/utils/port/sleep.h"
@@ -16,6 +17,7 @@
 #include "td/utils/port/thread.h"
 #include "td/utils/Random.h"
 #include "td/utils/Slice.h"
+#include "td/utils/SliceBuilder.h"
 #include "td/utils/Status.h"
 #include "td/utils/Time.h"
 
@@ -53,7 +55,9 @@ td::Result<TlsInfo> test_tls(const td::string &url) {
 
   td::string request;
 
-  auto add_string = [&](td::Slice data) { request.append(data.data(), data.size()); };
+  auto add_string = [&](td::Slice data) {
+    request.append(data.data(), data.size());
+  };
   auto add_random = [&](size_t length) {
     while (length-- > 0) {
       request += static_cast<char>(td::Random::secure_int32());
@@ -93,8 +97,8 @@ td::Result<TlsInfo> test_tls(const td::string &url) {
   const size_t MAX_GREASE = 7;
   char greases[MAX_GREASE];
   td::Random::secure_bytes(td::MutableSlice{greases, MAX_GREASE});
-  for (size_t i = 0; i < MAX_GREASE; i++) {
-    greases[i] = static_cast<char>((greases[i] & 0xF0) + 0x0A);
+  for (auto &grease : greases) {
+    grease = static_cast<char>((grease & 0xF0) + 0x0A);
   }
   for (size_t i = 1; i < MAX_GREASE; i += 2) {
     if (greases[i] == greases[i - 1]) {
@@ -111,11 +115,11 @@ td::Result<TlsInfo> test_tls(const td::string &url) {
   add_random(32);
   add_string("\x20");
   add_random(32);
-  add_string("\x00\x22");
+  add_string("\x00\x20");
   add_grease(0);
   add_string(
       "\x13\x01\x13\x02\x13\x03\xc0\x2b\xc0\x2f\xc0\x2c\xc0\x30\xcc\xa9\xcc\xa8\xc0\x13\xc0\x14\x00\x9c\x00\x9d\x00"
-      "\x2f\x00\x35\x00\x0a\x01\x00\x01\x91");
+      "\x2f\x00\x35\x01\x00\x01\x93");
   add_grease(2);
   add_string("\x00\x00\x00\x00");
   add_length(url.size() + 5);
@@ -127,8 +131,8 @@ td::Result<TlsInfo> test_tls(const td::string &url) {
   add_grease(4);
   add_string(
       "\x00\x1d\x00\x17\x00\x18\x00\x0b\x00\x02\x01\x00\x00\x23\x00\x00\x00\x10\x00\x0e\x00\x0c\x02\x68\x32\x08\x68"
-      "\x74\x74\x70\x2f\x31\x2e\x31\x00\x05\x00\x05\x01\x00\x00\x00\x00\x00\x0d\x00\x14\x00\x12\x04\x03\x08\x04\x04"
-      "\x01\x05\x03\x08\x05\x05\x01\x08\x06\x06\x01\x02\x01\x00\x12\x00\x00\x00\x33\x00\x2b\x00\x29");
+      "\x74\x74\x70\x2f\x31\x2e\x31\x00\x05\x00\x05\x01\x00\x00\x00\x00\x00\x0d\x00\x12\x00\x10\x04\x03\x08\x04\x04"
+      "\x01\x05\x03\x08\x05\x05\x01\x08\x06\x06\x01\x00\x12\x00\x00\x00\x33\x00\x2b\x00\x29");
   add_grease(4);
   add_string("\x00\x01\x00\x00\x1d\x00\x20");
   add_key();
@@ -153,7 +157,7 @@ td::Result<TlsInfo> test_tls(const td::string &url) {
   size_t server_hello_length = 0;
   size_t encrypted_application_data_length_sum = 0;
   while (td::Time::now() < end_time) {
-    char buf[20000];
+    static char buf[20000];
     TRY_RESULT(res, socket.read(td::MutableSlice{buf, sizeof(buf)}));
     if (res > 0) {
       auto read_length = [&]() -> size_t {
@@ -196,7 +200,7 @@ td::Result<TlsInfo> test_tls(const td::string &url) {
             if (random_id ==
                 "\xcf\x21\xad\x74\xe5\x9a\x61\x11\xbe\x1d\x8c\x02\x1e\x65\xb8\x91\xc2\xa2\x11\x16\x7a\xbb\x8c\x5e\x07"
                 "\x9e\x09\xe2\xc8\xa8\x33\x9c") {
-              return td::Status::Error("TLS 1.3 servers returning HelloRetryRequest are not supprted");
+              return td::Status::Error("TLS 1.3 servers returning HelloRetryRequest are not supported");
             }
             if (result[43] == '\x00') {
               return td::Status::Error("TLS <= 1.2: empty session_id");
@@ -210,7 +214,7 @@ td::Result<TlsInfo> test_tls(const td::string &url) {
             pos += 74;
             size_t extensions_length = read_length();
             if (extensions_length + 76 != server_hello_length) {
-              return td::Status::Error("Receive wrong extensions length");
+              return td::Status::Error("Receive wrong length of extensions");
             }
             while (pos < 5 + server_hello_length - 4) {
               info.extension_list.push_back(read_length());
@@ -221,7 +225,7 @@ td::Result<TlsInfo> test_tls(const td::string &url) {
               pos += extension_length;
             }
             if (pos != 5 + server_hello_length) {
-              return td::Status::Error("Receive wrong extensions list");
+              return td::Status::Error("Receive wrong list of extensions");
             }
           }
           if (pos == 5 + server_hello_length) {

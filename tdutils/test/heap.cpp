@@ -1,5 +1,5 @@
 //
-// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2019
+// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2026
 //
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
@@ -9,27 +9,23 @@
 #include "td/utils/common.h"
 #include "td/utils/Heap.h"
 #include "td/utils/Random.h"
+#include "td/utils/Span.h"
 
-#include <algorithm>
 #include <cstdio>
-#include <cstdlib>
 #include <set>
 #include <utility>
 
-REGISTER_TESTS(heap)
-
-using namespace td;
-
 TEST(Heap, sort_random_perm) {
   int n = 1000000;
-  std::vector<int> v(n);
+
+  td::vector<int> v(n);
   for (int i = 0; i < n; i++) {
     v[i] = i;
   }
-  std::srand(123);
-  std::random_shuffle(v.begin(), v.end());
-  std::vector<HeapNode> nodes(n);
-  KHeap<int> kheap;
+  td::Random::Xorshift128plus rnd(123);
+  td::Random::shuffle(td::as_mutable_span(v), rnd);
+  td::vector<td::HeapNode> nodes(n);
+  td::KHeap<int> kheap;
   for (int i = 0; i < n; i++) {
     kheap.insert(v[i], &nodes[i]);
   }
@@ -37,7 +33,7 @@ TEST(Heap, sort_random_perm) {
     ASSERT_EQ(i, kheap.top_key());
     kheap.pop();
   }
-};
+}
 
 class CheckedHeap {
  public:
@@ -50,10 +46,12 @@ class CheckedHeap {
       nodes[i].value = i;
     }
   }
-  static void xx(int key, const HeapNode *heap_node) {
+
+  static void xx(int key, const td::HeapNode *heap_node) {
     const Node *node = static_cast<const Node *>(heap_node);
     std::fprintf(stderr, "(%d;%d)", node->key, node->value);
   }
+
   void check() const {
     for (auto p : set_heap) {
       std::fprintf(stderr, "(%d;%d)", p.first, p.second);
@@ -63,13 +61,16 @@ class CheckedHeap {
     std::fprintf(stderr, "\n");
     kheap.check();
   }
+
   int random_id() const {
     CHECK(!empty());
-    return ids[Random::fast(0, static_cast<int>(ids.size() - 1))];
+    return ids[td::Random::fast(0, static_cast<int>(ids.size() - 1))];
   }
-  size_t size() const {
+
+  std::size_t size() const {
     return ids.size();
   }
+
   bool empty() const {
     return ids.empty();
   }
@@ -81,8 +82,8 @@ class CheckedHeap {
     ASSERT_EQ(res, kheap.top_key());
     return res;
   }
+
   int insert(int key) {
-    // std::fprintf(stderr, "insert %d\n", key);
     int id;
     if (free_ids.empty()) {
       UNREACHABLE();
@@ -100,15 +101,15 @@ class CheckedHeap {
     set_heap.emplace(key, id);
     return id;
   }
+
   void fix_key(int new_key, int id) {
-    // std::fprintf(stderr, "fix key %d %d (old_key = %d)\n", new_key, id, nodes[id].key);
     set_heap.erase(std::make_pair(nodes[id].key, id));
     nodes[id].key = new_key;
     kheap.fix(new_key, &nodes[id]);
     set_heap.emplace(new_key, id);
   }
+
   void erase(int id) {
-    // std::fprintf(stderr, "erase %d\n", id);
     int pos = rev_ids[id];
     CHECK(pos != -1);
     ids[pos] = ids.back();
@@ -120,8 +121,8 @@ class CheckedHeap {
     kheap.erase(&nodes[id]);
     set_heap.erase(std::make_pair(nodes[id].key, id));
   }
+
   void pop() {
-    // std::fprintf(stderr, "pop\n");
     CHECK(!empty());
     Node *node = static_cast<Node *>(kheap.pop());
     int id = node->value;
@@ -139,19 +140,19 @@ class CheckedHeap {
   }
 
  private:
-  struct Node : public HeapNode {
+  struct Node final : public td::HeapNode {
     Node() = default;
     Node(int key, int value) : key(key), value(value) {
     }
     int key = 0;
     int value = 0;
   };
-  vector<int> ids;
-  vector<int> rev_ids;
-  vector<int> free_ids;
-  vector<Node> nodes;
+  td::vector<int> ids;
+  td::vector<int> rev_ids;
+  td::vector<int> free_ids;
+  td::vector<Node> nodes;
   std::set<std::pair<int, int>> set_heap;
-  KHeap<int> kheap;
+  td::KHeap<int> kheap;
 };
 
 TEST(Heap, random_events) {
@@ -162,11 +163,11 @@ TEST(Heap, random_events) {
       heap.top_key();
     }
 
-    int x = Random::fast(0, 4);
+    int x = td::Random::fast(0, 4);
     if (heap.empty() || (x < 2 && heap.size() < 1000)) {
-      heap.insert(Random::fast(0, 99));
+      heap.insert(td::Random::fast(0, 99));
     } else if (x < 3) {
-      heap.fix_key(Random::fast(0, 99), heap.random_id());
+      heap.fix_key(td::Random::fast(0, 99), heap.random_id());
     } else if (x < 4) {
       heap.erase(heap.random_id());
     } else if (x < 5) {
